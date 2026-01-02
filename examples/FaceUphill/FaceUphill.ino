@@ -26,8 +26,8 @@ const int16_t maxSpeed = 150;
 
 // Change next line to this if you are using the older Zumo 32U4
 // with a black and green LCD display:
-// Zumo32U4LCD display;
-Zumo32U4OLED display;
+Zumo32U4LCD display;
+// Zumo32U4OLED display;
 
 Zumo32U4IMU imu;
 Zumo32U4Motors motors;

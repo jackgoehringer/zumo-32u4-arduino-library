@@ -23,8 +23,8 @@ with other types of motors. */
 // Change next line to this if you are using the older Zumo 32U4
 // with a black and green LCD display (and see note for the
 // targetAngle constant below):
-// Zumo32U4LCD display;
-Zumo32U4OLED display;
+Zumo32U4LCD display;
+// Zumo32U4OLED display;
 
 Zumo32U4ButtonA buttonA;
 Zumo32U4ButtonB buttonB;
@@ -54,7 +54,7 @@ float aAngle = 0;
 // the best target angle will depend on which version of the Zumo 32U4 you have.
 // We suggest starting with a value of 4.0 for the OLED version or 2.0 for the
 // LCD version.
-const float targetAngle = 4.0;
+const float targetAngle = 2.0;
 
 void setup()
 {
