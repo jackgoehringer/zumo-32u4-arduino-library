@@ -6,58 +6,46 @@
 #include "MotionController.h"
 
 /*
- * CommandHandler.h - High-level movement command interface
+ * CommandHandler.h - Simple movement command interface for demos
  *
- * Provides a simple API for issuing movement commands while balancing:
- * - Relative position moves (forward/backward N millimeters)
- * - Velocity commands (move at N mm/s for duration)
- * - Turn commands (rotate N degrees)
- * - Compound commands (move and turn simultaneously)
+ * Provides a minimal API for issuing movement commands while balancing:
+ * - move(distance): Forward/backward movement in mm
+ * - rotate(angle): In-place rotation in degrees
+ * - rotateFor(duration): Timed rotation (positive=CCW, negative=CW)
+ * - arc(distance, radius): Inscribe a circular arc
+ * - wait(duration): Pause for specified milliseconds
  *
- * Commands are queued and executed sequentially.
+ * Single-command execution model: one command at a time, check isIdle()
+ * before issuing new commands.
  */
 
 // Command types
 enum class CommandType : uint8_t
 {
-    NONE,
-    MOVE_RELATIVE,      // Move relative distance
-    SET_VELOCITY,       // Set velocity for duration
-    TURN_RELATIVE,      // Turn relative angle
-    MOVE_AND_TURN,      // Compound move + turn
-    STOP,               // Stop and hold position
-    WAIT                // Wait for duration
-};
-
-// Command state
-enum class CommandState : uint8_t
-{
-    IDLE,               // No command active
-    EXECUTING,          // Command in progress
-    COMPLETED,          // Command finished successfully
-    FAILED              // Command failed (e.g., robot fell)
+    NONE,       // No command / idle
+    MOVE,       // Straight line movement (forward/backward)
+    ROTATE,     // In-place rotation (CW/CCW)
+    ROTATE_FOR, // Timed rotation at constant rate
+    ARC,        // Circular arc movement
+    WAIT        // Timed pause
 };
 
 // Single command structure
 struct Command
 {
     CommandType type;
-    float param1;       // Distance (mm) or velocity (mm/s) or angle (deg)
-    float param2;       // Secondary param: velocity for moves, duration for velocity cmd
+    float param1;       // distance (mm) for MOVE/ARC, angle (deg) for ROTATE
+    float param2;       // radius (mm) for ARC only
     uint32_t startTime; // When command started (millis)
-    uint32_t duration;  // Max duration (ms), 0 = no limit
+    uint32_t duration;  // For WAIT command (ms)
 };
-
-// Command queue size
-#define COMMAND_QUEUE_SIZE 8
 
 class CommandHandler
 {
 public:
     CommandHandler()
         : motionController(nullptr),
-          state(CommandState::IDLE),
-          queueHead(0), queueTail(0), queueCount(0)
+          busy(false)
     {
         currentCommand.type = CommandType::NONE;
     }
@@ -69,14 +57,11 @@ public:
         clear();
     }
 
-    // Clear all commands and stop
+    // Clear current command and stop
     void clear()
     {
-        queueHead = 0;
-        queueTail = 0;
-        queueCount = 0;
         currentCommand.type = CommandType::NONE;
-        state = CommandState::IDLE;
+        busy = false;
 
         if (motionController)
         {
@@ -84,303 +69,187 @@ public:
         }
     }
 
-    // === Immediate Commands (interrupt current command) ===
+    // === Motion Commands ===
 
-    // Stop immediately and hold position
-    void stopNow()
+    // Move forward (positive) or backward (negative) by distance in mm
+    bool move(float distanceMM)
     {
-        clear();
-        if (motionController)
+        if (busy || !motionController)
         {
-            motionController->stop();
+            return false;
         }
-        state = CommandState::IDLE;
+
+        currentCommand.type = CommandType::MOVE;
+        currentCommand.param1 = distanceMM;
+        currentCommand.param2 = 0;
+        currentCommand.startTime = millis();
+        currentCommand.duration = 0;
+
+        motionController->moveRelativeMM(distanceMM);
+        busy = true;
+        return true;
     }
 
-    // === Queued Commands ===
-
-    // Move forward/backward by distance (mm), at specified velocity (mm/s)
-    // Negative distance = backward
-    bool moveRelative(float distanceMM, float velocityMM = DEFAULT_MOVE_VELOCITY)
+    // Rotate in place: positive = counterclockwise, negative = clockwise
+    bool rotate(float angleDeg)
     {
-        Command cmd;
-        cmd.type = CommandType::MOVE_RELATIVE;
-        cmd.param1 = constrain(distanceMM, -MAX_COMMAND_DISTANCE / COUNTS_PER_MM,
-                               MAX_COMMAND_DISTANCE / COUNTS_PER_MM);
-        cmd.param2 = fabs(velocityMM);
-        cmd.duration = 0;  // No timeout, complete when at position
-        return enqueue(cmd);
+        if (busy || !motionController)
+        {
+            return false;
+        }
+
+        currentCommand.type = CommandType::ROTATE;
+        currentCommand.param1 = angleDeg;
+        currentCommand.param2 = 0;
+        currentCommand.startTime = millis();
+        currentCommand.duration = 0;
+
+        motionController->turnRelative(angleDeg);
+        busy = true;
+        return true;
     }
 
-    // Move forward (convenience)
-    bool moveForward(float distanceMM, float velocityMM = DEFAULT_MOVE_VELOCITY)
+    // Rotate for a specified duration
+    // durationMs: positive = counterclockwise, negative = clockwise
+    // Rotates at MAX_TURN_RATE degrees per second
+    bool rotateFor(int32_t durationMs)
     {
-        return moveRelative(fabs(distanceMM), velocityMM);
+        if (busy || !motionController)
+        {
+            return false;
+        }
+
+        currentCommand.type = CommandType::ROTATE_FOR;
+        currentCommand.param1 = 0;
+        currentCommand.param2 = 0;
+        currentCommand.startTime = millis();
+        currentCommand.duration = abs(durationMs);
+
+        // Set turn rate: positive duration = CCW (positive rate)
+        // negative duration = CW (negative rate)
+        float turnRate = (durationMs >= 0) ? MAX_TURN_RATE : -MAX_TURN_RATE;
+        motionController->setTurnRate(turnRate);
+        busy = true;
+        return true;
     }
 
-    // Move backward (convenience)
-    bool moveBackward(float distanceMM, float velocityMM = DEFAULT_MOVE_VELOCITY)
+    // Move in a circular arc
+    // distanceMM: arc length to travel (positive = forward, negative = backward)
+    // radiusMM: turn radius (positive = curve left, negative = curve right)
+    bool arc(float distanceMM, float radiusMM)
     {
-        return moveRelative(-fabs(distanceMM), velocityMM);
+        if (busy || !motionController)
+        {
+            return false;
+        }
+
+        // Avoid division by zero
+        if (fabs(radiusMM) < 1.0f)
+        {
+            return false;
+        }
+
+        currentCommand.type = CommandType::ARC;
+        currentCommand.param1 = distanceMM;
+        currentCommand.param2 = radiusMM;
+        currentCommand.startTime = millis();
+        currentCommand.duration = 0;
+
+        // Calculate the angle swept during the arc
+        // angle (radians) = arc_length / radius
+        // Convert to degrees: angle_deg = (distance / radius) * (180 / PI)
+        float angleDeg = (distanceMM / radiusMM) * (180.0f / PI);
+
+        // Start coordinated arc motion
+        motionController->startArc(distanceMM, angleDeg);
+        busy = true;
+        return true;
     }
 
-    // Set velocity for specified duration (ms)
-    // velocity in mm/s, duration in ms (0 = indefinite until next command)
-    bool setVelocity(float velocityMM, uint32_t durationMs = 0)
-    {
-        Command cmd;
-        cmd.type = CommandType::SET_VELOCITY;
-        cmd.param1 = constrain(velocityMM, -MAX_COMMAND_VELOCITY / COUNTS_PER_MM,
-                               MAX_COMMAND_VELOCITY / COUNTS_PER_MM);
-        cmd.param2 = 0;
-        cmd.duration = durationMs;
-        return enqueue(cmd);
-    }
-
-    // Turn relative angle (degrees, positive = counterclockwise)
-    bool turnRelative(float angleDeg)
-    {
-        Command cmd;
-        cmd.type = CommandType::TURN_RELATIVE;
-        cmd.param1 = angleDeg;
-        cmd.param2 = 0;
-        cmd.duration = 0;  // Complete when at heading
-        return enqueue(cmd);
-    }
-
-    // Turn left (convenience)
-    bool turnLeft(float angleDeg)
-    {
-        return turnRelative(fabs(angleDeg));
-    }
-
-    // Turn right (convenience)
-    bool turnRight(float angleDeg)
-    {
-        return turnRelative(-fabs(angleDeg));
-    }
-
-    // Compound move and turn simultaneously
-    bool moveAndTurn(float distanceMM, float angleDeg, float velocityMM = DEFAULT_MOVE_VELOCITY)
-    {
-        Command cmd;
-        cmd.type = CommandType::MOVE_AND_TURN;
-        cmd.param1 = distanceMM;
-        cmd.param2 = angleDeg;
-        cmd.duration = 0;
-        return enqueue(cmd);
-    }
-
-    // Wait for duration (ms)
+    // Wait for specified duration in milliseconds
     bool wait(uint32_t durationMs)
     {
-        Command cmd;
-        cmd.type = CommandType::WAIT;
-        cmd.param1 = 0;
-        cmd.param2 = 0;
-        cmd.duration = durationMs;
-        return enqueue(cmd);
-    }
+        if (busy || !motionController)
+        {
+            return false;
+        }
 
-    // Add stop command to queue
-    bool queueStop()
-    {
-        Command cmd;
-        cmd.type = CommandType::STOP;
-        cmd.param1 = 0;
-        cmd.param2 = 0;
-        cmd.duration = 0;
-        return enqueue(cmd);
+        currentCommand.type = CommandType::WAIT;
+        currentCommand.param1 = 0;
+        currentCommand.param2 = 0;
+        currentCommand.startTime = millis();
+        currentCommand.duration = durationMs;
+
+        // Ensure robot holds position during wait
+        motionController->stop();
+        busy = true;
+        return true;
     }
 
     // === Update (call in main loop) ===
 
     void update()
     {
-        if (!motionController)
+        if (!motionController || !busy)
         {
             return;
         }
 
-        // If no active command, try to start next one
-        if (state == CommandState::IDLE || state == CommandState::COMPLETED)
+        bool complete = false;
+
+        switch (currentCommand.type)
         {
-            if (!dequeue())
+        case CommandType::MOVE:
+            complete = motionController->atTargetPosition();
+            break;
+
+        case CommandType::ROTATE:
+            complete = motionController->atTargetHeading();
+            break;
+
+        case CommandType::ROTATE_FOR:
+            complete = (millis() - currentCommand.startTime) >= currentCommand.duration;
+            if (complete)
             {
-                return;  // Queue empty
+                motionController->stopTurning();
             }
-            startCurrentCommand();
+            break;
+
+        case CommandType::ARC:
+            complete = motionController->atTargetPosition() &&
+                       motionController->atTargetHeading();
+            break;
+
+        case CommandType::WAIT:
+            complete = (millis() - currentCommand.startTime) >= currentCommand.duration;
+            break;
+
+        case CommandType::NONE:
+        default:
+            complete = true;
+            break;
         }
 
-        // Check if current command is complete
-        if (state == CommandState::EXECUTING)
+        if (complete)
         {
-            checkCommandComplete();
+            currentCommand.type = CommandType::NONE;
+            busy = false;
+            motionController->stop();
         }
     }
 
     // === Status ===
 
-    CommandState getState() const { return state; }
-    bool isBusy() const { return state == CommandState::EXECUTING; }
-    bool isIdle() const { return state == CommandState::IDLE && queueCount == 0; }
-    uint8_t getQueueCount() const { return queueCount; }
+    bool isIdle() const { return !busy; }
+    bool isBusy() const { return busy; }
     CommandType getCurrentCommandType() const { return currentCommand.type; }
+
+    // Get progress info for display
+    float getTargetDistance() const { return currentCommand.param1; }
+    float getTargetRadius() const { return currentCommand.param2; }
 
 private:
     MotionController* motionController;
-    CommandState state;
-
-    // Current command being executed
     Command currentCommand;
-
-    // Command queue (circular buffer)
-    Command queue[COMMAND_QUEUE_SIZE];
-    uint8_t queueHead;
-    uint8_t queueTail;
-    uint8_t queueCount;
-
-    // Add command to queue
-    bool enqueue(const Command& cmd)
-    {
-        if (queueCount >= COMMAND_QUEUE_SIZE)
-        {
-            return false;  // Queue full
-        }
-
-        queue[queueTail] = cmd;
-        queueTail = (queueTail + 1) % COMMAND_QUEUE_SIZE;
-        queueCount++;
-        return true;
-    }
-
-    // Get next command from queue
-    bool dequeue()
-    {
-        if (queueCount == 0)
-        {
-            return false;  // Queue empty
-        }
-
-        currentCommand = queue[queueHead];
-        queueHead = (queueHead + 1) % COMMAND_QUEUE_SIZE;
-        queueCount--;
-        return true;
-    }
-
-    // Start executing current command
-    void startCurrentCommand()
-    {
-        currentCommand.startTime = millis();
-        state = CommandState::EXECUTING;
-
-        switch (currentCommand.type)
-        {
-        case CommandType::MOVE_RELATIVE:
-            motionController->moveRelativeMM(currentCommand.param1);
-            // TODO: Set velocity limit from param2
-            break;
-
-        case CommandType::SET_VELOCITY:
-            motionController->setTargetVelocityMM(currentCommand.param1);
-            break;
-
-        case CommandType::TURN_RELATIVE:
-            motionController->turnRelative(currentCommand.param1);
-            break;
-
-        case CommandType::MOVE_AND_TURN:
-            motionController->moveRelativeMM(currentCommand.param1);
-            motionController->turnRelative(currentCommand.param2);
-            break;
-
-        case CommandType::STOP:
-            motionController->stop();
-            state = CommandState::COMPLETED;
-            break;
-
-        case CommandType::WAIT:
-            // Nothing to do, just wait
-            break;
-
-        case CommandType::NONE:
-        default:
-            state = CommandState::IDLE;
-            break;
-        }
-    }
-
-    // Check if current command is complete
-    void checkCommandComplete()
-    {
-        uint32_t elapsed = millis() - currentCommand.startTime;
-
-        // Check duration timeout
-        if (currentCommand.duration > 0 && elapsed >= currentCommand.duration)
-        {
-            completeCommand();
-            return;
-        }
-
-        switch (currentCommand.type)
-        {
-        case CommandType::MOVE_RELATIVE:
-            // Complete when at target position
-            if (motionController->atTargetPosition())
-            {
-                completeCommand();
-            }
-            break;
-
-        case CommandType::SET_VELOCITY:
-            // Complete when duration expires (checked above)
-            // If no duration, stays active until next command
-            break;
-
-        case CommandType::TURN_RELATIVE:
-            // Complete when at target heading
-            if (motionController->atTargetHeading())
-            {
-                completeCommand();
-            }
-            break;
-
-        case CommandType::MOVE_AND_TURN:
-            // Complete when both position and heading are reached
-            if (motionController->atTargetPosition() &&
-                motionController->atTargetHeading())
-            {
-                completeCommand();
-            }
-            break;
-
-        case CommandType::WAIT:
-            // Complete when duration expires (checked above)
-            if (currentCommand.duration == 0)
-            {
-                completeCommand();  // No duration = immediate complete
-            }
-            break;
-
-        default:
-            break;
-        }
-    }
-
-    void completeCommand()
-    {
-        state = CommandState::COMPLETED;
-        currentCommand.type = CommandType::NONE;
-
-        // Immediately try next command
-        if (dequeue())
-        {
-            startCurrentCommand();
-        }
-        else
-        {
-            state = CommandState::IDLE;
-            motionController->stop();  // Hold position when queue empty
-        }
-    }
+    bool busy;
 };

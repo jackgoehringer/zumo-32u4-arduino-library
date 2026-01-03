@@ -53,7 +53,7 @@
 // Set this to the angle shown when robot is balanced.
 // OLED version is heavier on top, needs more forward lean
 
-#define BALANCE_ANGLE 0.88f      // STEP 1: Find this value first!
+#define BALANCE_ANGLE -1.4f      // STEP 1: Find this value first!
 
 // Complementary filter accelerometer weight
 // Higher = trusts accelerometer more (reduces gyro drift)
@@ -78,8 +78,8 @@
 // Start with Ki=0, tune Kp until slight oscillation, back off 40%
 // Add Kd to dampen oscillation, then add small Ki if needed
 
-#define ANGLE_KP 65.0f       // STEP 2: Start at 20, increase until oscillation
-#define ANGLE_KI 0.0f       // STEP 4: Usually not needed, add last if robot leans
+#define ANGLE_KP 45.0f       // STEP 2: Start at 20, increase until oscillation
+#define ANGLE_KI 0.00f       // STEP 4: Usually not needed, add last if robot leans
 #define ANGLE_KD 0.9f       // STEP 3: Add after Kp tuned, damps oscillation
 
 // Integral windup limits (in degrees * seconds)
@@ -102,8 +102,8 @@
 // Add Ki only if slow drift persists
 
 // Velocity in encoder counts per second
-#define VELOCITY_KP 0.002f    // STEP 5: Start at 0.0005, increase until drift stops
-#define VELOCITY_KI 0.0001f    // STEP 6: Add if slow drift persists (start 0.0001)
+#define VELOCITY_KP 0.0035f    // STEP 5: Start at 0.0005, increase until drift stops
+#define VELOCITY_KI 0.00015f    // STEP 6: Add if slow drift persists (start 0.0001)
 #define VELOCITY_KD 0.0f    // Usually not needed
 
 // Integral windup limits (in (counts/s) * seconds)
@@ -125,7 +125,7 @@
 // TUNING: Only tune AFTER velocity loop is stable!
 // Usually only Kp is needed, Ki/Kd often cause problems
 
-#define POSITION_KP -1.0f    // STEP 7: Start at 0.3, increase for faster return
+#define POSITION_KP 1.3f     // STEP 7: Start at 0.3, increase for faster return
 #define POSITION_KI 0.0f    // Usually leave at 0
 #define POSITION_KD 0.0f    // Usually leave at 0
 
@@ -135,8 +135,8 @@
 
 // Maximum velocity from position controller (counts per second)
 // ~500 counts/s = ~55 mm/s
-#define POSITION_OUTPUT_MIN -250.0f
-#define POSITION_OUTPUT_MAX 250.0f
+#define POSITION_OUTPUT_MIN -1000.0f
+#define POSITION_OUTPUT_MAX 1000.0f
 
 // =============================================================================
 // TURN CONTROLLER (Heading/Yaw)
@@ -145,8 +145,8 @@
 // PD controller for turning while balancing
 // Output is differential motor speed (added to left, subtracted from right)
 
-#define TURN_KP 3.0f
-#define TURN_KD 0.05f
+#define TURN_KP 0.0f
+#define TURN_KD 0.0f
 
 // Maximum turn rate in degrees per second
 #define MAX_TURN_RATE 180.0f

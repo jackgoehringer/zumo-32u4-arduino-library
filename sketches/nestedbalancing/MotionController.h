@@ -25,11 +25,11 @@ public:
     MotionController()
         : position(0), velocity(0),
           targetPosition(0), targetVelocity(0),
-          targetHeading(0), heading(0), headingRate(0),
+          targetHeading(0), heading(0), headingRate(0), targetTurnRate(0),
           lastEncoderLeft(0), lastEncoderRight(0),
           lastVelocityUpdateTime(0), lastPositionUpdateTime(0),
           positionControlEnabled(true), velocityControlEnabled(true),
-          headingControlEnabled(false)
+          headingControlEnabled(false), turnRateControlEnabled(false)
     {
         // Configure velocity PID
         velocityPID.setGains(VELOCITY_KP, VELOCITY_KI, VELOCITY_KD);
@@ -58,6 +58,7 @@ public:
         targetVelocity = 0;
         targetHeading = 0;
         heading = 0;
+        targetTurnRate = 0;
 
         // Reset encoder tracking
         lastEncoderLeft = encoders->getCountsLeft();
@@ -65,6 +66,12 @@ public:
 
         lastVelocityUpdateTime = micros();
         lastPositionUpdateTime = micros();
+
+        // Reset control flags
+        positionControlEnabled = true;
+        velocityControlEnabled = true;
+        headingControlEnabled = false;
+        turnRateControlEnabled = false;
 
         velocityPID.reset();
         positionPID.reset();
@@ -124,13 +131,16 @@ public:
         // Velocity PID: error = targetVelocity - actualVelocity
         // Output: angle offset to add to BALANCE_ANGLE
         //
-        // Sign convention for this robot:
-        // - Forward motion: velocity +, angle - (tilted back)
-        // - To slow from forward: need angle offset + (lean forward to catch up)
-        // - PID output for positive error is positive
-        // - But we have negative error (0 - positive vel), so PID gives negative
-        // - We need positive, so NEGATE the output
-        return -velocityPID.compute(targetVelocity, velocity, dt);
+        // Empirically determined sign convention:
+        // - Positive angleOffset → robot leans forward → accelerates forward
+        // - Negative angleOffset → robot leans backward → decelerates/reverses
+        //
+        // To SLOW DOWN from forward motion (positive velocity):
+        // - We need negative angleOffset (lean backward)
+        // - PID gives: error = 0 - (+velocity) = negative → negative output
+        // - Negative output directly gives negative angleOffset (correct!)
+        // - Therefore NO negation needed
+        return velocityPID.compute(targetVelocity, velocity, dt);
     }
 
     // Compute position loop output (target velocity)
@@ -157,6 +167,17 @@ public:
     // Returns value to add to left motor and subtract from right motor
     float computeTurnOutput()
     {
+        // Turn rate control mode: command a constant turn rate
+        if (turnRateControlEnabled)
+        {
+            // Simple P control on turn rate
+            // targetTurnRate is in degrees/second, headingRate is measured rate
+            float rateError = targetTurnRate - headingRate;
+            float turnOutput = TURN_KP * rateError * 0.1f;  // Scale down for rate control
+            return constrain(turnOutput, -MAX_TURN_SPEED, MAX_TURN_SPEED);
+        }
+
+        // Heading control mode: turn to target heading
         if (!headingControlEnabled)
         {
             return 0;
@@ -212,8 +233,13 @@ public:
     {
         targetPosition = position;
         targetVelocity = 0;
+        targetTurnRate = 0;
         positionControlEnabled = true;
         velocityControlEnabled = true;
+        turnRateControlEnabled = false;
+        // Hold current heading
+        targetHeading = heading;
+        headingControlEnabled = true;
     }
 
     // Turn to absolute heading (degrees)
@@ -230,10 +256,45 @@ public:
         headingControlEnabled = true;
     }
 
+    // Start a coordinated arc motion (move + turn simultaneously)
+    // distanceMM: arc length to travel
+    // angleDeg: total heading change during the arc
+    void startArc(float distanceMM, float angleDeg)
+    {
+        // Set both position and heading targets
+        int32_t counts = (int32_t)(distanceMM * COUNTS_PER_MM);
+        targetPosition = position + counts;
+        targetHeading = heading + angleDeg;
+
+        // Enable both controls
+        positionControlEnabled = true;
+        headingControlEnabled = true;
+    }
+
     // Disable heading control (for manual turning)
     void disableHeadingControl()
     {
         headingControlEnabled = false;
+    }
+
+    // Set a constant turn rate (degrees per second)
+    // Positive = counterclockwise, negative = clockwise
+    // This disables heading control and directly commands turn output
+    void setTurnRate(float degreesPerSecond)
+    {
+        targetTurnRate = constrain(degreesPerSecond, -MAX_TURN_RATE, MAX_TURN_RATE);
+        turnRateControlEnabled = true;
+        headingControlEnabled = false;
+    }
+
+    // Stop turning (disable turn rate control)
+    void stopTurning()
+    {
+        targetTurnRate = 0;
+        turnRateControlEnabled = false;
+        // Re-enable heading control to hold current heading
+        targetHeading = heading;
+        headingControlEnabled = true;
     }
 
     // === Getters ===
@@ -286,6 +347,7 @@ private:
     float targetHeading;      // Target heading (degrees)
     float heading;            // Current heading (degrees)
     float headingRate;        // Current turn rate (degrees/second)
+    float targetTurnRate;     // Target turn rate for timed rotation (degrees/second)
 
     // Encoder tracking
     int16_t lastEncoderLeft;
@@ -299,6 +361,7 @@ private:
     bool positionControlEnabled;
     bool velocityControlEnabled;
     bool headingControlEnabled;
+    bool turnRateControlEnabled;
 
     // PID controllers
     PIDController velocityPID;

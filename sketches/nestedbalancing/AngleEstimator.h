@@ -71,8 +71,9 @@ public:
 
         // Calculate angular velocity in degrees per second
         // Gyro sensitivity is 0.07 dps per digit for 2000 dps full scale
-        // Negated to match balancing direction (positive angle = forward tilt)
-        angleRate = -((float)imu->g.y - gyroOffset) * GYRO_SENSITIVITY;
+        // Positive gyro Y reading = robot tilting forward = positive angle change
+        // (matches Pololu's official Balancing example sign convention)
+        angleRate = ((float)imu->g.y - gyroOffset) * GYRO_SENSITIVITY;
 
         // Integrate to get angle change
         // dt is in microseconds, convert to seconds
@@ -89,9 +90,9 @@ public:
 
         // Calculate angle from accelerometer using atan2
         // When robot is vertical: z points up, x points forward
-        // angle = atan2(z, -x) gives pitch angle
-        // Negated to match balancing direction (positive angle = forward tilt)
-        accelAngle = atan2(imu->a.z, -imu->a.x) * 180.0f / M_PI;
+        // angle = -atan2(z, -x) gives pitch angle
+        // (matches Pololu's official Balancing example sign convention)
+        accelAngle = -atan2(imu->a.z, -imu->a.x) * 180.0f / M_PI;
 
         // Calculate magnitude of acceleration vector in units of g
         // For 2g full scale: 4096 counts per g

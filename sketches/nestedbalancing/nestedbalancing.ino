@@ -226,10 +226,10 @@ void runInnerLoop()
     targetAngle = BALANCE_ANGLE + angleOffset;
 
     // Compute motor output using PID
-    // Note: Using simplified compute() since we're running at variable rate
-    // The gains should be tuned for this rate
-    float error = targetAngle - currentAngle;
-    float dError = -angleRate;  // Derivative of error (negative of angle rate)
+    // Error = angle - target (matches official Balancing example)
+    // Positive error = tilted too far forward = need positive motor speed to catch up
+    float error = currentAngle - targetAngle;
+    float dError = angleRate;  // Derivative of error (same sign as angle rate)
 
     // Manual PID computation for better control
     static float integral = 0;
@@ -290,16 +290,37 @@ void updateDisplay()
 
     float angle = angleEstimator.getAngle();
 
-    // Line 1: Angle and velocity
-    display.print(angle, 1);  // 1 decimal place
-    display.print(F(" "));
-    display.print((int)motionController.getVelocity());
+    if (demoMode)
+    {
+        // Demo mode: Show heading info for turn tuning
+        // Line 1: Current heading and target heading
+        display.print(F("H:"));
+        display.print((int)motionController.getHeading());
+        display.print(F(">"));
+        display.print((int)motionController.getTargetHeading());
 
-    // Line 2: Position and angle offset
-    display.gotoXY(0, 1);
-    display.print((int)motionController.getPositionMM());
-    display.print(F(" "));
-    display.print(angleOffset, 1);
+        // Line 2: Heading error and step number
+        display.gotoXY(0, 1);
+        float headingError = motionController.getTargetHeading() - motionController.getHeading();
+        display.print(F("E:"));
+        display.print((int)headingError);
+        display.print(F(" S"));
+        display.print(demoStep);
+    }
+    else
+    {
+        // Normal mode: Angle and velocity
+        // Line 1: Angle and velocity
+        display.print(angle, 1);  // 1 decimal place
+        display.print(F(" "));
+        display.print((int)motionController.getVelocity());
+
+        // Line 2: Position and angle offset
+        display.gotoXY(0, 1);
+        display.print((int)motionController.getPositionMM());
+        display.print(F(" "));
+        display.print(angleOffset, 1);
+    }
 }
 
 // Handle button presses
@@ -354,8 +375,8 @@ void handleButtons()
     {
         if (robotState == RobotState::BALANCING)
         {
-            // Queue a test move
-            commandHandler.moveForward(100);  // Move forward 100mm
+            // Test move: forward 100mm
+            commandHandler.move(100);
         }
     }
 }
@@ -454,12 +475,12 @@ void handleFall()
     buzzer.playNote(NOTE_A(3), 300, 15);
 }
 
-// Run demo sequence: Turn while moving in a tight circle
+// Run demo sequence: Move forward 300mm, rotate for 500ms, repeat
 void runDemoSequence()
 {
     uint32_t elapsed = millis() - demoStartTime;
 
-    // Only add new commands when queue is empty
+    // Wait for current command to complete before issuing next
     if (!commandHandler.isIdle())
     {
         return;
@@ -468,38 +489,29 @@ void runDemoSequence()
     switch (demoStep)
     {
     case 0:
-        // Wait 2 seconds after starting
+        // Initial stabilization period
         if (elapsed > 2000)
         {
-            // Start moving forward while continuously turning right
-            // This creates a tight circular path
-            commandHandler.moveForward(2000);  // Move forward 2m
-            commandHandler.turnRight(360);     // Complete full circle while moving
+            buzzer.playNote(NOTE_C(5), 100, 15);
             demoStep++;
         }
         break;
 
     case 1:
-        // Pause briefly, then reverse direction (circle left)
-        commandHandler.wait(1000);
-        commandHandler.moveForward(2000);  // Move forward 2m
-        commandHandler.turnLeft(360);      // Complete full circle left while moving
+        // Move forward 300mm
+        commandHandler.move(300.0f);
         demoStep++;
         break;
 
     case 2:
-        // Pause, then do a tighter circle (faster turn rate)
-        commandHandler.wait(1000);
-        commandHandler.moveForward(1000);  // Shorter distance
-        commandHandler.turnRight(720);     // Two full circles (tighter radius)
+        // Rotate clockwise for 500ms
+        commandHandler.move(-300.0f);
         demoStep++;
         break;
 
     case 3:
-        // Demo complete, restart loop
-        commandHandler.wait(2000);
-        demoStep = 0;
-        demoStartTime = millis();
+        // Restart sequence
+        demoStep = 1;
         break;
     }
 }
