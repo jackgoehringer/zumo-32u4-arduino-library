@@ -29,7 +29,7 @@ public:
           lastEncoderLeft(0), lastEncoderRight(0),
           lastVelocityUpdateTime(0), lastPositionUpdateTime(0),
           positionControlEnabled(true), velocityControlEnabled(true),
-          headingControlEnabled(false), turnRateControlEnabled(false)
+          headingControlEnabled(true), turnRateControlEnabled(false)  // heading enabled by default
     {
         // Configure velocity PID
         velocityPID.setGains(VELOCITY_KP, VELOCITY_KI, VELOCITY_KD);
@@ -40,6 +40,12 @@ public:
         positionPID.setGains(POSITION_KP, POSITION_KI, POSITION_KD);
         positionPID.setOutputLimits(POSITION_OUTPUT_MIN, POSITION_OUTPUT_MAX);
         positionPID.setIntegralLimits(POSITION_INTEGRAL_MIN, POSITION_INTEGRAL_MAX);
+
+        // Configure heading PID
+        headingPID.setGains(TURN_KP, TURN_KI, TURN_KD);
+        headingPID.setOutputLimits(TURN_OUTPUT_MIN, TURN_OUTPUT_MAX);
+        headingPID.setIntegralLimits(TURN_INTEGRAL_MIN, TURN_INTEGRAL_MAX);
+        headingPID.setDerivativeOnMeasurement(true);  // Use gyro rate directly
     }
 
     // Initialize with encoder reference
@@ -67,14 +73,15 @@ public:
         lastVelocityUpdateTime = micros();
         lastPositionUpdateTime = micros();
 
-        // Reset control flags
+        // Reset control flags - heading enabled by default
         positionControlEnabled = true;
         velocityControlEnabled = true;
-        headingControlEnabled = false;
+        headingControlEnabled = true;
         turnRateControlEnabled = false;
 
         velocityPID.reset();
         positionPID.reset();
+        headingPID.reset();
     }
 
     // Update encoder readings and compute velocity
@@ -113,9 +120,11 @@ public:
     // gyroZ: raw gyro Z reading
     // gyroOffsetZ: calibrated Z offset
     // dt: time step in seconds
+    // Note: Negated so counterclockwise rotation = positive heading change
+    // (standard math convention, matches how turnOutput is applied to motors)
     void updateHeading(int16_t gyroZ, float gyroOffsetZ, float dt)
     {
-        headingRate = ((float)gyroZ - gyroOffsetZ) * GYRO_SENSITIVITY;
+        headingRate = -((float)gyroZ - gyroOffsetZ) * GYRO_SENSITIVITY;
         heading += headingRate * dt;
     }
 
@@ -163,9 +172,18 @@ public:
         targetVelocity = velocityCommand;
     }
 
+    // Normalize angle to [-180, 180] range
+    float normalizeAngle(float angle)
+    {
+        while (angle > 180.0f) angle -= 360.0f;
+        while (angle < -180.0f) angle += 360.0f;
+        return angle;
+    }
+
     // Compute turn output (differential motor speed)
-    // Returns value to add to left motor and subtract from right motor
-    float computeTurnOutput()
+    // dt: time step in seconds (for integral term)
+    // Returns value to subtract from left motor and add to right motor
+    float computeTurnOutput(float dt)
     {
         // Turn rate control mode: command a constant turn rate
         if (turnRateControlEnabled)
@@ -183,12 +201,16 @@ public:
             return 0;
         }
 
-        float headingError = targetHeading - heading;
-
-        // Simple PD control for turning
-        float turnOutput = TURN_KP * headingError - TURN_KD * headingRate;
-
-        return constrain(turnOutput, -MAX_TURN_SPEED, MAX_TURN_SPEED);
+        // Normalize heading error to [-180, 180] so robot takes shortest path
+        // This ensures it reverses direction if it overshoots
+        float headingError = normalizeAngle(targetHeading - heading);
+        
+        // Compute effective target for PID (current heading + normalized error)
+        // This tricks the PID into seeing a small error even if actual heading is far from target
+        float effectiveTarget = heading + headingError;
+        
+        // Use PID controller for heading stabilization
+        return headingPID.compute(effectiveTarget, heading, dt);
     }
 
     // === Command Interface ===
@@ -295,6 +317,16 @@ public:
         // Re-enable heading control to hold current heading
         targetHeading = heading;
         headingControlEnabled = true;
+        headingPID.reset(heading);  // Reset with current measurement to avoid derivative spike
+    }
+
+    // Lock in current heading as target (call at start of move commands)
+    void holdCurrentHeading()
+    {
+        targetHeading = heading;
+        headingControlEnabled = true;
+        turnRateControlEnabled = false;
+        headingPID.reset(heading);  // Reset with current measurement to avoid derivative spike
     }
 
     // === Getters ===
@@ -306,6 +338,16 @@ public:
     float getHeading() const { return heading; }
     float getHeadingRate() const { return headingRate; }
     float getTargetHeading() const { return targetHeading; }
+    
+    // Get normalized heading error (for debugging)
+    // Positive = need to turn CCW, Negative = need to turn CW
+    float getHeadingError() const
+    {
+        float error = targetHeading - heading;
+        while (error > 180.0f) error -= 360.0f;
+        while (error < -180.0f) error += 360.0f;
+        return error;
+    }
 
     // Get position in millimeters
     float getPositionMM() const { return (float)position / COUNTS_PER_MM; }
@@ -320,9 +362,14 @@ public:
     }
 
     // Check if at target heading (within tolerance)
+    // Uses normalized error so 359° and 1° are considered close
     bool atTargetHeading(float toleranceDeg = 2.0f) const
     {
-        return fabs(heading - targetHeading) < toleranceDeg;
+        float error = targetHeading - heading;
+        // Normalize to [-180, 180]
+        while (error > 180.0f) error -= 360.0f;
+        while (error < -180.0f) error += 360.0f;
+        return fabs(error) < toleranceDeg;
     }
 
     // === Configuration ===
@@ -333,6 +380,7 @@ public:
     // Access to PID controllers for tuning
     PIDController& getVelocityPID() { return velocityPID; }
     PIDController& getPositionPID() { return positionPID; }
+    PIDController& getHeadingPID() { return headingPID; }
 
 private:
     Zumo32U4Encoders* encoders;
@@ -366,4 +414,5 @@ private:
     // PID controllers
     PIDController velocityPID;
     PIDController positionPID;
+    PIDController headingPID;
 };

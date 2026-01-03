@@ -81,6 +81,10 @@ bool demoMode = false;
 uint8_t demoStep = 0;
 uint32_t demoStartTime = 0;
 
+// Debug display mode (cycle through with button C while balancing)
+// 0 = normal, 1 = heading debug, 2 = motor debug
+uint8_t debugDisplayMode = 0;
+
 // Forward declarations
 void runInnerLoop();
 void runMiddleLoop();
@@ -262,15 +266,19 @@ void runMiddleLoop()
     float dt = MIDDLE_LOOP_PERIOD_US / 1000000.0f;
     angleOffset = motionController.computeVelocityLoop(dt);
 
-    // Update heading from gyro Z-axis (for turning)
-    // Note: We'd need to add Z-axis tracking to AngleEstimator
-    // For now, use gyro Z directly
+    // Update heading from gyro Z-axis (using calibrated offset)
     imu.readGyro();
-    static float gyroOffsetZ = 0;  // Should be calibrated
-    motionController.updateHeading(imu.g.z, gyroOffsetZ, dt);
+    motionController.updateHeading(imu.g.z, angleEstimator.getGyroOffsetZ(), dt);
 
-    // Compute turn output
-    turnOutput = motionController.computeTurnOutput();
+    // Update Z-axis drift compensation
+    angleEstimator.updateZDriftCompensation(
+        imu.g.z,
+        motionController.getHeadingRate(),
+        motionController.getVelocity()
+    );
+
+    // Compute turn output (with dt for proper integral term)
+    turnOutput = motionController.computeTurnOutput(dt);
 
     // Update command handler
     commandHandler.update();
@@ -306,6 +314,40 @@ void updateDisplay()
         display.print((int)headingError);
         display.print(F(" S"));
         display.print(demoStep);
+    }
+    else if (debugDisplayMode == 1)
+    {
+        // Debug mode 1: Heading diagnostics
+        // Line 1: H=heading, E=normalized error
+        display.print(F("H"));
+        display.print((int)motionController.getHeading());
+        display.print(F(" E"));
+        display.print((int)motionController.getHeadingError());
+
+        // Line 2: O=turnOutput, R=headingRate
+        display.gotoXY(0, 1);
+        display.print(F("O"));
+        display.print((int)turnOutput);
+        display.print(F(" R"));
+        display.print((int)motionController.getHeadingRate());
+    }
+    else if (debugDisplayMode == 2)
+    {
+        // Debug mode 2: Motor diagnostics
+        // Line 1: L=left motor, R=right motor
+        int16_t leftSpeed = constrain((int16_t)(motorOutput - turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+        int16_t rightSpeed = constrain((int16_t)(motorOutput + turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+        display.print(F("L"));
+        display.print(leftSpeed);
+        display.print(F(" R"));
+        display.print(rightSpeed);
+
+        // Line 2: M=motorOutput, T=turnOutput
+        display.gotoXY(0, 1);
+        display.print(F("M"));
+        display.print((int)motorOutput);
+        display.print(F(" T"));
+        display.print((int)turnOutput);
     }
     else
     {
@@ -350,7 +392,7 @@ void handleButtons()
         }
     }
 
-    if (buttonB.getSingleDebouncedRelease())
+    if (buttonB.getSingleDebouncedRelease()) // SWAPPED TO DEBUG MODE, CHANGE TO B TO DEMO
     {
         if (robotState == RobotState::CALIBRATED)
         {
@@ -375,8 +417,29 @@ void handleButtons()
     {
         if (robotState == RobotState::BALANCING)
         {
-            // Test move: forward 100mm
-            commandHandler.move(100);
+            if (!demoMode)
+            {
+                // Cycle debug display mode: 0 -> 1 -> 2 -> 0
+                // Also trigger a test rotation when entering mode 1
+                debugDisplayMode = (debugDisplayMode + 1) % 3;
+                
+                if (debugDisplayMode == 1)
+                {
+                    // Entering heading debug mode - start a 90 degree rotation test
+                    commandHandler.rotate(90);
+                    buzzer.playNote(NOTE_E(5), 50, 15);
+                }
+                else if (debugDisplayMode == 0)
+                {
+                    // Back to normal mode
+                    commandHandler.clear();
+                }
+            }
+            else
+            {
+                // In demo mode: test move forward 100mm
+                commandHandler.move(100);
+            }
         }
     }
 }
@@ -498,18 +561,23 @@ void runDemoSequence()
         break;
 
     case 1:
-        // Move forward 300mm
-        commandHandler.move(300.0f);
+        // Move backwards 300mm
+        commandHandler.rotate(-180);
         demoStep++;
         break;
 
     case 2:
         // Rotate clockwise for 500ms
-        commandHandler.move(-300.0f);
+        commandHandler.rotate(180);
         demoStep++;
         break;
 
     case 3:
+        
+        commandHandler.rotate(-180);
+        break;
+
+    case 4:
         // Restart sequence
         demoStep = 1;
         break;

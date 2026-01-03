@@ -80,7 +80,7 @@
 
 #define ANGLE_KP 45.0f       // STEP 2: Start at 20, increase until oscillation
 #define ANGLE_KI 0.00f       // STEP 4: Usually not needed, add last if robot leans
-#define ANGLE_KD 0.9f       // STEP 3: Add after Kp tuned, damps oscillation
+#define ANGLE_KD 0.9f       // STEP 3: Add after Kp tuned damps oscillation
 
 // Integral windup limits (in degrees * seconds)
 #define ANGLE_INTEGRAL_MIN -40.0f
@@ -125,7 +125,7 @@
 // TUNING: Only tune AFTER velocity loop is stable!
 // Usually only Kp is needed, Ki/Kd often cause problems
 
-#define POSITION_KP 1.3f     // STEP 7: Start at 0.3, increase for faster return
+#define POSITION_KP 1.31f     // STEP 7: Start at 0.3, increase for faster return
 #define POSITION_KI 0.0f    // Usually leave at 0
 #define POSITION_KD 0.0f    // Usually leave at 0
 
@@ -142,13 +142,28 @@
 // TURN CONTROLLER (Heading/Yaw)
 // =============================================================================
 
-// PD controller for turning while balancing
-// Output is differential motor speed (added to left, subtracted from right)
+// PID controller for heading stabilization while balancing
+// Output is differential motor speed (subtracted from left, added to right)
 
-#define TURN_KP 0.0f
-#define TURN_KD 0.0f
+// Tuning guide:
+// - KP: Controls how aggressively robot turns toward target. Too high = overshoot.
+//       With max output 100 and typical error up to 180 deg, KP ~0.5 gives output ~90 at 180 deg error.
+// - KD: Critical for damping! Opposes rotational velocity to prevent overshoot.
+//       Should be high enough to stop rotation before reaching target.
+// - KI: Only needed if there's steady-state error. Start at 0, add if needed.
+#define TURN_KP 0.5f         // Proportional gain for heading error (degrees)
+#define TURN_KI 0.0f         // Integral gain for steady-state correction (start at 0)
+#define TURN_KD 0.8f         // Derivative gain (damping from gyro rate) - CRITICAL
 
-// Maximum turn rate in degrees per second
+// Integral windup limits for heading controller (degrees * seconds)
+#define TURN_INTEGRAL_MIN -50.0f
+#define TURN_INTEGRAL_MAX 50.0f
+
+// Output limits (differential motor speed)
+#define TURN_OUTPUT_MIN -200.0f
+#define TURN_OUTPUT_MAX 200.0f
+
+// Maximum turn rate in degrees per second (for timed rotation commands)
 #define MAX_TURN_RATE 180.0f
 
 // Maximum differential motor speed for turning
@@ -198,3 +213,10 @@
 
 // Drift compensation filter coefficient (smaller = slower adaptation)
 #define GYRO_DRIFT_ALPHA 0.001f
+
+// =============================================================================
+// Z-AXIS GYRO DRIFT COMPENSATION
+// =============================================================================
+
+#define ENABLE_GYRO_Z_DRIFT_COMPENSATION true
+#define GYRO_Z_DRIFT_RATE_THRESHOLD 2.0f      // degrees per second

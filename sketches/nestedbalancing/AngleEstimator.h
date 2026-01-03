@@ -22,7 +22,7 @@ class AngleEstimator
 {
 public:
     AngleEstimator()
-        : angle(0), angleRate(0), gyroOffset(0),
+        : angle(0), angleRate(0), gyroOffset(0), gyroOffsetZ(0),
           lastUpdateTime(0), accelAngle(0)
     {
     }
@@ -39,18 +39,22 @@ public:
     }
 
     // Calibrate gyro offset by averaging samples while stationary
+    // Calibrates both Y-axis (pitch) and Z-axis (yaw) offsets
     void calibrateGyro()
     {
         gyroOffset = 0;
+        gyroOffsetZ = 0;
 
         for (uint16_t i = 0; i < GYRO_CALIBRATION_SAMPLES; i++)
         {
             while (!imu->gyroDataReady()) {}
             imu->readGyro();
             gyroOffset += imu->g.y;
+            gyroOffsetZ += imu->g.z;
         }
 
         gyroOffset /= GYRO_CALIBRATION_SAMPLES;
+        gyroOffsetZ /= GYRO_CALIBRATION_SAMPLES;
     }
 
     // Update angle estimate using gyro integration
@@ -153,6 +157,28 @@ public:
         return gyroOffset;
     }
 
+    // Get Z-axis gyro offset (for heading control)
+    float getGyroOffsetZ() const
+    {
+        return gyroOffsetZ;
+    }
+
+    // Update Z-axis gyro drift compensation
+    // Call when robot is relatively still (in middle loop)
+    void updateZDriftCompensation(int16_t rawGyroZ, float headingRate, float velocity)
+    {
+#if ENABLE_GYRO_Z_DRIFT_COMPENSATION
+        // Only update offset when robot is quiet
+        if (fabs(headingRate) < GYRO_Z_DRIFT_RATE_THRESHOLD &&
+            fabs(velocity) < GYRO_DRIFT_VELOCITY_THRESHOLD)
+        {
+            // Slowly adapt gyro Z offset
+            gyroOffsetZ = (1.0f - GYRO_DRIFT_ALPHA) * gyroOffsetZ +
+                           GYRO_DRIFT_ALPHA * (float)rawGyroZ;
+        }
+#endif
+    }
+
     // Reset angle to a specific value (e.g., after recovery)
     void setAngle(float newAngle)
     {
@@ -171,7 +197,8 @@ private:
     Zumo32U4IMU* imu;
     float angle;          // Current angle estimate (degrees)
     float angleRate;      // Current angular velocity (degrees/s)
-    float gyroOffset;     // Gyro Y-axis bias
+    float gyroOffset;     // Gyro Y-axis bias (pitch)
+    float gyroOffsetZ;    // Gyro Z-axis bias (yaw/heading)
     uint32_t lastUpdateTime;
     float accelAngle;     // Last accelerometer-derived angle
 };

@@ -85,6 +85,8 @@ public:
         currentCommand.startTime = millis();
         currentCommand.duration = 0;
 
+        // Lock in current heading before starting move to ensure straight-line motion
+        motionController->holdCurrentHeading();
         motionController->moveRelativeMM(distanceMM);
         busy = true;
         return true;
