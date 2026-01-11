@@ -24,9 +24,7 @@ enum class CommandType : uint8_t
 {
     NONE,       // No command / idle
     MOVE,       // Straight line movement (forward/backward)
-    ROTATE,     // In-place rotation (CW/CCW)
-    ROTATE_FOR, // Timed rotation at constant rate
-    ARC,        // Circular arc movement
+    ARC,        // Arc turn with tightness/speed/angle
     WAIT        // Timed pause
 };
 
@@ -34,8 +32,9 @@ enum class CommandType : uint8_t
 struct Command
 {
     CommandType type;
-    float param1;       // distance (mm) for MOVE/ARC, angle (deg) for ROTATE
-    float param2;       // radius (mm) for ARC only
+    float param1;       // For MOVE: distance (mm); For ARC: tightness (0-1)
+    float param2;       // For MOVE: unused;      For ARC: speed (mm/s)
+    float param3;       // For ARC: angle (degrees)
     uint32_t startTime; // When command started (millis)
     uint32_t duration;  // For WAIT command (ms)
 };
@@ -82,6 +81,7 @@ public:
         currentCommand.type = CommandType::MOVE;
         currentCommand.param1 = distanceMM;
         currentCommand.param2 = 0;
+        currentCommand.param3 = 0;
         currentCommand.startTime = millis();
         currentCommand.duration = 0;
 
@@ -92,78 +92,31 @@ public:
         return true;
     }
 
-    // Rotate in place: positive = counterclockwise, negative = clockwise
-    bool rotate(float angleDeg)
+    // Turn along an arc (tightness 0-1, speed mm/s, angle degrees)
+    // tightness: 0 = straight, 1 = minimum radius (inner wheel stopped)
+    // speedMMperSec: forward speed during turn (positive=forward)
+    // angleDeg: heading change (positive=CCW, negative=CW)
+    bool turnArc(float tightness, float speedMMperSec, float angleDeg)
     {
         if (busy || !motionController)
         {
             return false;
         }
 
-        currentCommand.type = CommandType::ROTATE;
-        currentCommand.param1 = angleDeg;
-        currentCommand.param2 = 0;
-        currentCommand.startTime = millis();
-        currentCommand.duration = 0;
-
-        motionController->turnRelative(angleDeg);
-        busy = true;
-        return true;
-    }
-
-    // Rotate for a specified duration
-    // durationMs: positive = counterclockwise, negative = clockwise
-    // Rotates at MAX_TURN_RATE degrees per second
-    bool rotateFor(int32_t durationMs)
-    {
-        if (busy || !motionController)
-        {
-            return false;
-        }
-
-        currentCommand.type = CommandType::ROTATE_FOR;
-        currentCommand.param1 = 0;
-        currentCommand.param2 = 0;
-        currentCommand.startTime = millis();
-        currentCommand.duration = abs(durationMs);
-
-        // Set turn rate: positive duration = CCW (positive rate)
-        // negative duration = CW (negative rate)
-        float turnRate = (durationMs >= 0) ? MAX_TURN_RATE : -MAX_TURN_RATE;
-        motionController->setTurnRate(turnRate);
-        busy = true;
-        return true;
-    }
-
-    // Move in a circular arc
-    // distanceMM: arc length to travel (positive = forward, negative = backward)
-    // radiusMM: turn radius (positive = curve left, negative = curve right)
-    bool arc(float distanceMM, float radiusMM)
-    {
-        if (busy || !motionController)
-        {
-            return false;
-        }
-
-        // Avoid division by zero
-        if (fabs(radiusMM) < 1.0f)
+        // If speed is zero or angle is zero, nothing to do
+        if (speedMMperSec == 0.0f || angleDeg == 0.0f)
         {
             return false;
         }
 
         currentCommand.type = CommandType::ARC;
-        currentCommand.param1 = distanceMM;
-        currentCommand.param2 = radiusMM;
+        currentCommand.param1 = tightness;
+        currentCommand.param2 = speedMMperSec;
+        currentCommand.param3 = angleDeg;
         currentCommand.startTime = millis();
         currentCommand.duration = 0;
 
-        // Calculate the angle swept during the arc
-        // angle (radians) = arc_length / radius
-        // Convert to degrees: angle_deg = (distance / radius) * (180 / PI)
-        float angleDeg = (distanceMM / radiusMM) * (180.0f / PI);
-
-        // Start coordinated arc motion
-        motionController->startArc(distanceMM, angleDeg);
+        motionController->startArcTurn(tightness, speedMMperSec, angleDeg);
         busy = true;
         return true;
     }
@@ -179,6 +132,7 @@ public:
         currentCommand.type = CommandType::WAIT;
         currentCommand.param1 = 0;
         currentCommand.param2 = 0;
+        currentCommand.param3 = 0;
         currentCommand.startTime = millis();
         currentCommand.duration = durationMs;
 
@@ -205,21 +159,8 @@ public:
             complete = motionController->atTargetPosition();
             break;
 
-        case CommandType::ROTATE:
-            complete = motionController->atTargetHeading();
-            break;
-
-        case CommandType::ROTATE_FOR:
-            complete = (millis() - currentCommand.startTime) >= currentCommand.duration;
-            if (complete)
-            {
-                motionController->stopTurning();
-            }
-            break;
-
         case CommandType::ARC:
-            complete = motionController->atTargetPosition() &&
-                       motionController->atTargetHeading();
+            complete = motionController->isArcComplete();
             break;
 
         case CommandType::WAIT:
@@ -247,11 +188,13 @@ public:
     CommandType getCurrentCommandType() const { return currentCommand.type; }
 
     // Get progress info for display
-    float getTargetDistance() const { return currentCommand.param1; }
-    float getTargetRadius() const { return currentCommand.param2; }
+    float getCurrentArcTightness() const { return currentCommand.param1; }
+    float getCurrentArcSpeed() const { return currentCommand.param2; }
+    float getCurrentArcAngle() const { return currentCommand.param3; }
 
 private:
     MotionController* motionController;
     Command currentCommand;
     bool busy;
+    bool turningInPlace;  // True during explicit rotate() commands
 };

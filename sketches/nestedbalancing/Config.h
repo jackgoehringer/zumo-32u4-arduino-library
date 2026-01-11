@@ -151,7 +151,7 @@
 // - KD: Critical for damping! Opposes rotational velocity to prevent overshoot.
 //       Should be high enough to stop rotation before reaching target.
 // - KI: Only needed if there's steady-state error. Start at 0, add if needed.
-#define TURN_KP 0.5f         // Proportional gain for heading error (degrees)
+#define TURN_KP 1.0f         // Proportional gain for heading error (degrees)
 #define TURN_KI 0.0f         // Integral gain for steady-state correction (start at 0)
 #define TURN_KD 0.8f         // Derivative gain (damping from gyro rate) - CRITICAL
 
@@ -169,6 +169,52 @@
 // Maximum differential motor speed for turning
 #define MAX_TURN_SPEED 100.0f
 
+// Wheel track width (center-to-center distance between wheels, in mm)
+#define WHEEL_TRACK_MM 85.0f
+#define HALF_TRACK_MM (WHEEL_TRACK_MM / 2.0f)
+
+// Acceptable heading error (degrees) - used for atTargetHeading() tolerance
+#define HEADING_TOLERANCE_DEG 5.0f
+
+// =============================================================================
+// ENCODER-BASED HEADING CORRECTION
+// =============================================================================
+
+// Hybrid heading control uses both gyro and encoder difference to maintain heading
+// Encoder difference detects wheel speed mismatch (friction, motor differences)
+// This correction is always active when heading control is enabled
+
+// Proportional gain for encoder difference correction
+// Units: motor speed per encoder count difference
+// Higher = more aggressive correction for wheel speed mismatch
+#define ENCODER_HEADING_KP 0.8f
+
+// Maximum correction from encoder difference (prevents overcorrection)
+#define ENCODER_HEADING_MAX 50.0f
+
+// =============================================================================
+// ARC TURN PARAMETERS
+// =============================================================================
+
+// Arc completion tolerances
+#define ARC_ANGLE_TOLERANCE_DEG 2.0f      // heading tolerance for arc completion
+#define ARC_LENGTH_TOLERANCE_MM 2.0f      // arc length tolerance in mm
+
+// Default speed for arc/rotate-style commands (mm/s)
+#define DEFAULT_ARC_SPEED 50.0f
+
+// Maximum turn rate for arc turns (degrees per second)
+#define MAX_ARC_TURN_RATE 180.0f
+
+// =============================================================================
+// TURN-IN-PLACE BALANCE CONTROLLER
+// =============================================================================
+
+// Simplified balance gains (legacy) — retained for safety but not used in arc turns
+#define TURN_BALANCE_KP 30.0f    // Proportional gain (lower than ANGLE_KP)
+#define TURN_BALANCE_KD 0.6f     // Derivative gain for damping
+// No integral term - we don't need steady-state accuracy during turn
+
 // =============================================================================
 // SAFETY LIMITS
 // =============================================================================
@@ -181,6 +227,11 @@
 
 // Maximum motor speed (hardware limit is 400)
 #define MAX_MOTOR_SPEED 400
+
+// Minimum motor output during active commands (helps overcome static friction)
+// This ensures enough baseline power to move when turning or accelerating from rest
+// Set to 0 to disable, typical range: 30-80
+#define MIN_MOTOR_OUTPUT 70
 
 // =============================================================================
 // MOTION COMMAND LIMITS

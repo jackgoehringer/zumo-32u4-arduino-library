@@ -26,7 +26,10 @@ public:
         : position(0), velocity(0),
           targetPosition(0), targetVelocity(0),
           targetHeading(0), heading(0), headingRate(0), targetTurnRate(0),
-          lastEncoderLeft(0), lastEncoderRight(0),
+          arcModeEnabled(false), arcTargetAngle(0), arcCompletedAngle(0),
+          arcTargetLengthMM(0), arcCompletedLengthMM(0), arcTurnRadiusMM(0),
+          arcTightness(0), arcSpeedMMps(0),
+          lastEncoderLeft(0), lastEncoderRight(0), encoderDiffAccum(0),
           lastVelocityUpdateTime(0), lastPositionUpdateTime(0),
           positionControlEnabled(true), velocityControlEnabled(true),
           headingControlEnabled(true), turnRateControlEnabled(false)  // heading enabled by default
@@ -66,9 +69,20 @@ public:
         heading = 0;
         targetTurnRate = 0;
 
+        // Arc state
+        arcModeEnabled = false;
+        arcTargetAngle = 0;
+        arcCompletedAngle = 0;
+        arcTargetLengthMM = 0;
+        arcCompletedLengthMM = 0;
+        arcTurnRadiusMM = 0;
+        arcTightness = 0;
+        arcSpeedMMps = 0;
+
         // Reset encoder tracking
         lastEncoderLeft = encoders->getCountsLeft();
         lastEncoderRight = encoders->getCountsRight();
+        encoderDiffAccum = 0;
 
         lastVelocityUpdateTime = micros();
         lastPositionUpdateTime = micros();
@@ -109,6 +123,17 @@ public:
         // Update position (32-bit to avoid overflow)
         position += deltaAvg;
 
+        // Track encoder difference for heading correction
+        // Positive difference means left wheel moved more = veering right
+        // This accumulates over time to detect sustained drift
+        encoderDiffAccum += (deltaLeft - deltaRight);
+
+        // Track arc distance if in arc mode
+        if (arcModeEnabled)
+        {
+            arcCompletedLengthMM += (float)deltaAvg / COUNTS_PER_MM;
+        }
+
         // Compute velocity in counts per second
         if (dt > 0)
         {
@@ -127,6 +152,77 @@ public:
         headingRate = -((float)gyroZ - gyroOffsetZ) * GYRO_SENSITIVITY;
         heading += headingRate * dt;
     }
+
+    // Start an arc turn (tightness 0..1, speed mm/s, angle degrees)
+    void startArcTurn(float tightness, float speedMMps, float angleDeg)
+    {
+        arcModeEnabled = true;
+        arcTightness = constrain(tightness, 0.0f, 1.0f);
+        arcSpeedMMps = speedMMps;
+        arcTargetAngle = angleDeg;
+        arcCompletedAngle = 0;
+        arcCompletedLengthMM = 0;
+
+        // Compute turn radius
+        if (arcTightness <= 0.0f)
+        {
+            arcTurnRadiusMM = 1e9f;  // effectively straight
+        }
+        else
+        {
+            arcTurnRadiusMM = HALF_TRACK_MM * (1.0f + arcTightness) / arcTightness;
+        }
+
+        // Target arc length (if tightness > 0)
+        arcTargetLengthMM = (float)fabs(angleDeg) * (float)M_PI / 180.0f * arcTurnRadiusMM;
+
+        // Disable position control during arc; keep velocity + heading
+        positionControlEnabled = false;
+        velocityControlEnabled = true;
+        headingControlEnabled = true;
+        turnRateControlEnabled = false;
+
+        // Set heading target to final desired heading
+        targetHeading = heading + angleDeg;
+        headingPID.reset(heading);
+
+        // Reset velocity PID to ensure clean startup (prevents integral windup issues)
+        velocityPID.reset();
+
+        // Reset encoder diff and set target velocity
+        encoderDiffAccum = 0;
+        float targetVelCounts = speedMMps * COUNTS_PER_MM;
+        targetVelocity = constrain(targetVelCounts, -MAX_COMMAND_VELOCITY, MAX_COMMAND_VELOCITY);
+    }
+
+    // Update arc progress using gyro angle delta (degrees) and distance delta (mm)
+    void updateArcProgress(float deltaAngleDeg, float deltaLengthMM)
+    {
+        if (!arcModeEnabled)
+        {
+            return;
+        }
+
+        arcCompletedAngle += deltaAngleDeg;
+        arcCompletedLengthMM += deltaLengthMM;
+    }
+
+    // Check if arc turn is complete
+    bool isArcComplete() const
+    {
+        if (!arcModeEnabled)
+        {
+            return false;
+        }
+
+        bool angleDone = fabs(arcCompletedAngle) >= (fabs(arcTargetAngle) - ARC_ANGLE_TOLERANCE_DEG);
+        bool lengthDone = fabs(arcCompletedLengthMM) >= (arcTargetLengthMM - ARC_LENGTH_TOLERANCE_MM);
+        return angleDone || lengthDone;
+    }
+
+    bool isArcModeEnabled() const { return arcModeEnabled; }
+    float getTurnRadius() const { return arcTurnRadiusMM; }
+    float getArcSpeedMMps() const { return arcSpeedMMps; }
 
     // Compute velocity loop output (target angle offset)
     // Call this at MIDDLE_LOOP rate
@@ -183,6 +279,10 @@ public:
     // Compute turn output (differential motor speed)
     // dt: time step in seconds (for integral term)
     // Returns value to subtract from left motor and add to right motor
+    // 
+    // Uses HYBRID heading control:
+    // 1. Gyro-based: PID on heading error (corrects absolute heading drift)
+    // 2. Encoder-based: P on encoder difference (corrects wheel speed mismatch)
     float computeTurnOutput(float dt)
     {
         // Turn rate control mode: command a constant turn rate
@@ -201,16 +301,27 @@ public:
             return 0;
         }
 
+        // === Gyro-based correction (absolute heading) ===
         // Normalize heading error to [-180, 180] so robot takes shortest path
-        // This ensures it reverses direction if it overshoots
         float headingError = normalizeAngle(targetHeading - heading);
         
         // Compute effective target for PID (current heading + normalized error)
-        // This tricks the PID into seeing a small error even if actual heading is far from target
         float effectiveTarget = heading + headingError;
         
-        // Use PID controller for heading stabilization
-        return headingPID.compute(effectiveTarget, heading, dt);
+        // Gyro-based PID output
+        float gyroCorrection = headingPID.compute(effectiveTarget, heading, dt);
+
+        // === Encoder-based correction (wheel speed mismatch) ===
+        // Positive encoderDiffAccum means left wheel moved more = robot veered right
+        // To correct, we need positive turnOutput (right motor faster = turn left)
+        // So the sign is correct: positive diff -> positive correction
+        float encoderCorrection = ENCODER_HEADING_KP * (float)encoderDiffAccum;
+        encoderCorrection = constrain(encoderCorrection, -ENCODER_HEADING_MAX, ENCODER_HEADING_MAX);
+
+        // === Combine both corrections ===
+        float totalOutput = gyroCorrection + encoderCorrection;
+        
+        return constrain(totalOutput, TURN_OUTPUT_MIN, TURN_OUTPUT_MAX);
     }
 
     // === Command Interface ===
@@ -259,6 +370,11 @@ public:
         positionControlEnabled = true;
         velocityControlEnabled = true;
         turnRateControlEnabled = false;
+        arcModeEnabled = false;
+        arcTargetAngle = 0;
+        arcCompletedAngle = 0;
+        arcTargetLengthMM = 0;
+        arcCompletedLengthMM = 0;
         // Hold current heading
         targetHeading = heading;
         headingControlEnabled = true;
@@ -327,6 +443,32 @@ public:
         headingControlEnabled = true;
         turnRateControlEnabled = false;
         headingPID.reset(heading);  // Reset with current measurement to avoid derivative spike
+        encoderDiffAccum = 0;       // Reset encoder difference tracking
+    }
+
+    // Enter turn-in-place mode (disables position and velocity control)
+    // This allows the heading controller to dominate without outer loops fighting it
+    void enterTurnInPlaceMode()
+    {
+        positionControlEnabled = false;
+        velocityControlEnabled = false;
+        targetVelocity = 0;
+    }
+
+    // Exit turn-in-place mode (re-enables position and velocity control)
+    // Captures current position as new target to accept any drift that occurred
+    void exitTurnInPlaceMode()
+    {
+        // Capture current position as new target (accept drift that occurred)
+        targetPosition = position;
+        targetVelocity = 0;
+        
+        positionControlEnabled = true;
+        velocityControlEnabled = true;
+        
+        // Reset PIDs to avoid integral windup issues
+        velocityPID.reset();
+        positionPID.reset();
     }
 
     // === Getters ===
@@ -338,6 +480,7 @@ public:
     float getHeading() const { return heading; }
     float getHeadingRate() const { return headingRate; }
     float getTargetHeading() const { return targetHeading; }
+    float getArcTightness() const { return arcTightness; }
     
     // Get normalized heading error (for debugging)
     // Positive = need to turn CCW, Negative = need to turn CW
@@ -348,6 +491,10 @@ public:
         while (error < -180.0f) error += 360.0f;
         return error;
     }
+
+    // Get accumulated encoder difference (for debugging)
+    // Positive = left moved more than right = veered right
+    int32_t getEncoderDiffAccum() const { return encoderDiffAccum; }
 
     // Get position in millimeters
     float getPositionMM() const { return (float)position / COUNTS_PER_MM; }
@@ -363,7 +510,7 @@ public:
 
     // Check if at target heading (within tolerance)
     // Uses normalized error so 359° and 1° are considered close
-    bool atTargetHeading(float toleranceDeg = 2.0f) const
+    bool atTargetHeading(float toleranceDeg = HEADING_TOLERANCE_DEG) const
     {
         float error = targetHeading - heading;
         // Normalize to [-180, 180]
@@ -397,9 +544,20 @@ private:
     float headingRate;        // Current turn rate (degrees/second)
     float targetTurnRate;     // Target turn rate for timed rotation (degrees/second)
 
+    // Arc turn state
+    bool arcModeEnabled;
+    float arcTargetAngle;         // Total angle to turn (degrees)
+    float arcCompletedAngle;      // Angle turned so far (degrees)
+    float arcTargetLengthMM;      // Target arc length to travel (mm)
+    float arcCompletedLengthMM;   // Arc length traveled so far (mm)
+    float arcTurnRadiusMM;        // Current turn radius (mm)
+    float arcTightness;           // 0-1 tightness factor
+    float arcSpeedMMps;           // Forward speed during arc (mm/s)
+
     // Encoder tracking
     int16_t lastEncoderLeft;
     int16_t lastEncoderRight;
+    int32_t encoderDiffAccum;     // Accumulated left-right encoder difference
 
     // Timing
     uint32_t lastVelocityUpdateTime;

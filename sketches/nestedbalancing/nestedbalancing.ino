@@ -226,6 +226,13 @@ void runInnerLoop()
     float currentAngle = angleEstimator.getAngle();
     float angleRate = angleEstimator.getAngleRate();
 
+    // Track mode transitions to reset integral
+    static float integral = 0;
+    
+    // ARC TURN MODE: Use full cascaded control including velocity loop
+    // The MotionController keeps velocity control enabled during arc turns,
+    // so we must apply angleOffset to maintain the commanded forward speed
+    
     // Compute target angle (balance point + offset from velocity loop)
     targetAngle = BALANCE_ANGLE + angleOffset;
 
@@ -236,12 +243,26 @@ void runInnerLoop()
     float dError = angleRate;  // Derivative of error (same sign as angle rate)
 
     // Manual PID computation for better control
-    static float integral = 0;
     integral += error;
     integral = constrain(integral, ANGLE_INTEGRAL_MIN, ANGLE_INTEGRAL_MAX);
 
     motorOutput = ANGLE_KP * error + ANGLE_KI * integral + ANGLE_KD * dError;
     motorOutput = constrain(motorOutput, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+
+    // Apply minimum motor output during active commands to overcome static friction
+    // This helps ensure the robot has enough power to start moving from rest
+    if (MIN_MOTOR_OUTPUT > 0 && commandHandler.isBusy())
+    {
+        // Apply minimum threshold while preserving sign
+        if (motorOutput > 0 && motorOutput < MIN_MOTOR_OUTPUT)
+        {
+            motorOutput = MIN_MOTOR_OUTPUT;
+        }
+        else if (motorOutput < 0 && motorOutput > -MIN_MOTOR_OUTPUT)
+        {
+            motorOutput = -MIN_MOTOR_OUTPUT;
+        }
+    }
 
     // Apply motor output with turn differential
     int16_t leftSpeed = constrain((int16_t)(motorOutput - turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
@@ -262,13 +283,21 @@ void runMiddleLoop()
     // Optional: Update gyro drift compensation when robot is still
     angleEstimator.updateDriftCompensation(motionController.getVelocity());
 
-    // Compute velocity loop output (angle offset)
     float dt = MIDDLE_LOOP_PERIOD_US / 1000000.0f;
+
     angleOffset = motionController.computeVelocityLoop(dt);
 
     // Update heading from gyro Z-axis (using calibrated offset)
     imu.readGyro();
     motionController.updateHeading(imu.g.z, angleEstimator.getGyroOffsetZ(), dt);
+
+    // Update arc progress if active
+    if (motionController.isArcModeEnabled())
+    {
+        float deltaAngle = motionController.getHeadingRate() * dt;
+        float deltaLength = motionController.getVelocityMM() * dt;
+        motionController.updateArcProgress(deltaAngle, deltaLength);
+    }
 
     // Update Z-axis drift compensation
     angleEstimator.updateZDriftCompensation(
@@ -300,20 +329,19 @@ void updateDisplay()
 
     if (demoMode)
     {
-        // Demo mode: Show heading info for turn tuning
-        // Line 1: Current heading and target heading
-        display.print(F("H:"));
+        // Demo mode: Show step number and velocity
+        // Line 1: Step number and velocity
+        display.print(F("S"));
+        display.print(demoStep);
+        display.print(F(" V"));
+        display.print((int)motionController.getVelocity());
+
+        // Line 2: Heading and target heading
+        display.gotoXY(0, 1);
+        display.print(F("H"));
         display.print((int)motionController.getHeading());
         display.print(F(">"));
         display.print((int)motionController.getTargetHeading());
-
-        // Line 2: Heading error and step number
-        display.gotoXY(0, 1);
-        float headingError = motionController.getTargetHeading() - motionController.getHeading();
-        display.print(F("E:"));
-        display.print((int)headingError);
-        display.print(F(" S"));
-        display.print(demoStep);
     }
     else if (debugDisplayMode == 1)
     {
@@ -425,8 +453,8 @@ void handleButtons()
                 
                 if (debugDisplayMode == 1)
                 {
-                    // Entering heading debug mode - start a 90 degree rotation test
-                    commandHandler.rotate(90);
+                    // Entering heading debug mode - start a 90 degree arc turn test
+                    commandHandler.turnArc(0.5, 50, 90);
                     buzzer.playNote(NOTE_E(5), 50, 15);
                 }
                 else if (debugDisplayMode == 0)
@@ -553,7 +581,7 @@ void runDemoSequence()
     {
     case 0:
         // Initial stabilization period
-        if (elapsed > 2000)
+        if (elapsed > 1000)
         {
             buzzer.playNote(NOTE_C(5), 100, 15);
             demoStep++;
@@ -561,23 +589,71 @@ void runDemoSequence()
         break;
 
     case 1:
-        // Move backwards 300mm
-        commandHandler.rotate(-180);
+        commandHandler.move(-200);
         demoStep++;
         break;
-
     case 2:
-        // Rotate clockwise for 500ms
-        commandHandler.rotate(180);
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 3:
+        commandHandler.turnArc(0.5, 50, 90);
+        demoStep++;
+        break;
+    case 4:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 5:
+        commandHandler.move(-200);
+        demoStep++;
+        break;
+    case 6:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 7:
+        commandHandler.turnArc(0.5, 50, 90);
+        demoStep++;
+        break;
+    case 8:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 9:
+        commandHandler.move(-200);
+        demoStep++;
+        break;
+    case 10:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 11:
+        commandHandler.turnArc(0.5, 50, 90);
+        demoStep++;
+        break;
+    case 12:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 13:
+        commandHandler.move(-200);
+        demoStep++;
+        break;
+    case 14:
+        commandHandler.wait(100);
+        demoStep++;
+        break;
+    case 15:
+        commandHandler.turnArc(0.5, 50, 90);
+        demoStep++;
+        break;
+    case 16:
+        commandHandler.wait(100);
         demoStep++;
         break;
 
-    case 3:
-        
-        commandHandler.rotate(-180);
-        break;
-
-    case 4:
+    case 17:
         // Restart sequence
         demoStep = 1;
         break;
