@@ -12,10 +12,6 @@
 // HARDWARE CONFIGURATION
 // =============================================================================
 
-// Set to true for OLED version, false for LCD version
-// The different display weights affect the balance point
-#define ZUMO_OLED_VERSION false
-
 // Encoder counts per millimeter of travel
 // Zumo 32U4: 12 CPR motor encoder * 75.81:1 gearbox / (32mm wheel * PI)
 // = 909.7 counts per revolution / 100.5mm circumference = 9.05 counts/mm
@@ -27,10 +23,6 @@
 // =============================================================================
 // LOOP TIMING (in microseconds)
 // =============================================================================
-
-// Inner loop (angle control) - runs as fast as possible with gyro polling
-// Target: ~200 Hz (5000 us), actual rate depends on gyro data ready
-#define INNER_LOOP_PERIOD_US 5000
 
 // Middle loop (velocity control) - runs at encoder update rate
 // Target: 50 Hz (20000 us)
@@ -163,9 +155,6 @@
 #define TURN_OUTPUT_MIN -200.0f
 #define TURN_OUTPUT_MAX 200.0f
 
-// Maximum turn rate in degrees per second (for timed rotation commands)
-#define MAX_TURN_RATE 180.0f
-
 // Maximum differential motor speed for turning
 #define MAX_TURN_SPEED 100.0f
 
@@ -200,21 +189,6 @@
 #define ARC_ANGLE_TOLERANCE_DEG 2.0f      // heading tolerance for arc completion
 #define ARC_LENGTH_TOLERANCE_MM 2.0f      // arc length tolerance in mm
 
-// Default speed for arc/rotate-style commands (mm/s)
-#define DEFAULT_ARC_SPEED 50.0f
-
-// Maximum turn rate for arc turns (degrees per second)
-#define MAX_ARC_TURN_RATE 180.0f
-
-// =============================================================================
-// TURN-IN-PLACE BALANCE CONTROLLER
-// =============================================================================
-
-// Simplified balance gains (legacy) — retained for safety but not used in arc turns
-#define TURN_BALANCE_KP 30.0f    // Proportional gain (lower than ANGLE_KP)
-#define TURN_BALANCE_KD 0.6f     // Derivative gain for damping
-// No integral term - we don't need steady-state accuracy during turn
-
 // =============================================================================
 // SAFETY LIMITS
 // =============================================================================
@@ -240,13 +214,6 @@
 // Maximum velocity that can be commanded (counts per second)
 // ~1000 counts/s = ~110 mm/s
 #define MAX_COMMAND_VELOCITY 1000.0f
-
-// Maximum position command per move (counts)
-// ~9050 counts = 1 meter
-#define MAX_COMMAND_DISTANCE 9050.0f
-
-// Default velocity for position moves (counts per second)
-#define DEFAULT_MOVE_VELOCITY 100.0f
 
 // =============================================================================
 // GYRO CALIBRATION

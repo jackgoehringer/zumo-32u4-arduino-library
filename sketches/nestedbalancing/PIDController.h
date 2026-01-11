@@ -112,35 +112,6 @@ public:
         return output;
     }
 
-    // Simplified compute without dt (for use in fixed-rate loops)
-    // Assumes dt = 1, gains should be pre-scaled accordingly
-    float compute(float setpoint, float measurement)
-    {
-        float error = setpoint - measurement;
-
-        float pTerm = kp * error;
-
-        integral += error;
-        integral = constrain(integral, integralMin, integralMax);
-        float iTerm = ki * integral;
-
-        float dTerm;
-        if (derivativeOnMeasurement)
-        {
-            dTerm = -kd * (measurement - lastMeasurement);
-        }
-        else
-        {
-            dTerm = kd * (error - lastError);
-        }
-
-        lastError = error;
-        lastMeasurement = measurement;
-
-        float output = pTerm + iTerm + dTerm;
-        return constrain(output, outMin, outMax);
-    }
-
     // Reset controller state (call when re-enabling control)
     void reset()
     {
@@ -155,24 +126,6 @@ public:
         integral = 0;
         lastError = 0;
         lastMeasurement = initialMeasurement;
-    }
-
-    // Get current integral value (useful for debugging)
-    float getIntegral() const
-    {
-        return integral;
-    }
-
-    // Get last error (useful for debugging)
-    float getLastError() const
-    {
-        return lastError;
-    }
-
-    // Manually set integral (useful for bumpless transfer)
-    void setIntegral(float value)
-    {
-        integral = constrain(value, integralMin, integralMax);
     }
 
 private:

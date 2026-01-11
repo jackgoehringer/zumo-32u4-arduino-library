@@ -50,7 +50,6 @@ Zumo32U4Encoders encoders;
 AngleEstimator angleEstimator;
 MotionController motionController;
 CommandHandler commandHandler;
-PIDController anglePID;
 
 // Control state
 enum class RobotState : uint8_t
@@ -81,10 +80,6 @@ bool demoMode = false;
 uint8_t demoStep = 0;
 uint32_t demoStartTime = 0;
 
-// Debug display mode (cycle through with button C while balancing)
-// 0 = normal, 1 = heading debug, 2 = motor debug
-uint8_t debugDisplayMode = 0;
-
 // Forward declarations
 void runInnerLoop();
 void runMiddleLoop();
@@ -109,12 +104,6 @@ void setup()
     imu.init();
     imu.enableDefault();
     imu.configureForBalancing();
-
-    // Initialize angle PID controller
-    anglePID.setGains(ANGLE_KP, ANGLE_KI, ANGLE_KD);
-    anglePID.setOutputLimits(ANGLE_OUTPUT_MIN, ANGLE_OUTPUT_MAX);
-    anglePID.setIntegralLimits(ANGLE_INTEGRAL_MIN, ANGLE_INTEGRAL_MAX);
-    anglePID.setDerivativeOnMeasurement(true);  // Prevents derivative kick
 
     // Initialize motion controller
     motionController.begin(&encoders);
@@ -343,40 +332,6 @@ void updateDisplay()
         display.print(F(">"));
         display.print((int)motionController.getTargetHeading());
     }
-    else if (debugDisplayMode == 1)
-    {
-        // Debug mode 1: Heading diagnostics
-        // Line 1: H=heading, E=normalized error
-        display.print(F("H"));
-        display.print((int)motionController.getHeading());
-        display.print(F(" E"));
-        display.print((int)motionController.getHeadingError());
-
-        // Line 2: O=turnOutput, R=headingRate
-        display.gotoXY(0, 1);
-        display.print(F("O"));
-        display.print((int)turnOutput);
-        display.print(F(" R"));
-        display.print((int)motionController.getHeadingRate());
-    }
-    else if (debugDisplayMode == 2)
-    {
-        // Debug mode 2: Motor diagnostics
-        // Line 1: L=left motor, R=right motor
-        int16_t leftSpeed = constrain((int16_t)(motorOutput - turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-        int16_t rightSpeed = constrain((int16_t)(motorOutput + turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-        display.print(F("L"));
-        display.print(leftSpeed);
-        display.print(F(" R"));
-        display.print(rightSpeed);
-
-        // Line 2: M=motorOutput, T=turnOutput
-        display.gotoXY(0, 1);
-        display.print(F("M"));
-        display.print((int)motorOutput);
-        display.print(F(" T"));
-        display.print((int)turnOutput);
-    }
     else
     {
         // Normal mode: Angle and velocity
@@ -443,31 +398,10 @@ void handleButtons()
 
     if (buttonC.getSingleDebouncedRelease())
     {
-        if (robotState == RobotState::BALANCING)
+        if (robotState == RobotState::BALANCING && demoMode)
         {
-            if (!demoMode)
-            {
-                // Cycle debug display mode: 0 -> 1 -> 2 -> 0
-                // Also trigger a test rotation when entering mode 1
-                debugDisplayMode = (debugDisplayMode + 1) % 3;
-                
-                if (debugDisplayMode == 1)
-                {
-                    // Entering heading debug mode - start a 90 degree arc turn test
-                    commandHandler.turnArc(0.5, 50, 90);
-                    buzzer.playNote(NOTE_E(5), 50, 15);
-                }
-                else if (debugDisplayMode == 0)
-                {
-                    // Back to normal mode
-                    commandHandler.clear();
-                }
-            }
-            else
-            {
-                // In demo mode: test move forward 100mm
-                commandHandler.move(100);
-            }
+            // In demo mode: test move forward 100mm
+            commandHandler.move(100);
         }
     }
 }
@@ -506,7 +440,6 @@ void calibrateGyro()
 void startBalancing()
 {
     // Reset controllers
-    anglePID.reset();
     motionController.reset();
     commandHandler.clear();
 
@@ -597,7 +530,7 @@ void runDemoSequence()
         demoStep++;
         break;
     case 3:
-        commandHandler.turnArc(0.5, 50, 90);
+        commandHandler.turnArc(0.2, 75, 90);
         demoStep++;
         break;
     case 4:
@@ -613,7 +546,7 @@ void runDemoSequence()
         demoStep++;
         break;
     case 7:
-        commandHandler.turnArc(0.5, 50, 90);
+        commandHandler.turnArc(0.2, 75, 90);
         demoStep++;
         break;
     case 8:
@@ -629,7 +562,7 @@ void runDemoSequence()
         demoStep++;
         break;
     case 11:
-        commandHandler.turnArc(0.5, 50, 90);
+        commandHandler.turnArc(0.2, 75, 90);
         demoStep++;
         break;
     case 12:
@@ -645,7 +578,7 @@ void runDemoSequence()
         demoStep++;
         break;
     case 15:
-        commandHandler.turnArc(0.5, 50, 90);
+        commandHandler.turnArc(0.2, 75, 90);
         demoStep++;
         break;
     case 16:

@@ -25,14 +25,14 @@ public:
     MotionController()
         : position(0), velocity(0),
           targetPosition(0), targetVelocity(0),
-          targetHeading(0), heading(0), headingRate(0), targetTurnRate(0),
+          targetHeading(0), heading(0), headingRate(0),
           arcModeEnabled(false), arcTargetAngle(0), arcCompletedAngle(0),
           arcTargetLengthMM(0), arcCompletedLengthMM(0), arcTurnRadiusMM(0),
           arcTightness(0), arcSpeedMMps(0),
           lastEncoderLeft(0), lastEncoderRight(0), encoderDiffAccum(0),
-          lastVelocityUpdateTime(0), lastPositionUpdateTime(0),
+          lastVelocityUpdateTime(0),
           positionControlEnabled(true), velocityControlEnabled(true),
-          headingControlEnabled(true), turnRateControlEnabled(false)  // heading enabled by default
+          headingControlEnabled(true)  // heading enabled by default
     {
         // Configure velocity PID
         velocityPID.setGains(VELOCITY_KP, VELOCITY_KI, VELOCITY_KD);
@@ -67,7 +67,6 @@ public:
         targetVelocity = 0;
         targetHeading = 0;
         heading = 0;
-        targetTurnRate = 0;
 
         // Arc state
         arcModeEnabled = false;
@@ -85,13 +84,11 @@ public:
         encoderDiffAccum = 0;
 
         lastVelocityUpdateTime = micros();
-        lastPositionUpdateTime = micros();
 
         // Reset control flags - heading enabled by default
         positionControlEnabled = true;
         velocityControlEnabled = true;
         headingControlEnabled = true;
-        turnRateControlEnabled = false;
 
         velocityPID.reset();
         positionPID.reset();
@@ -180,7 +177,6 @@ public:
         positionControlEnabled = false;
         velocityControlEnabled = true;
         headingControlEnabled = true;
-        turnRateControlEnabled = false;
 
         // Set heading target to final desired heading
         targetHeading = heading + angleDeg;
@@ -221,7 +217,6 @@ public:
     }
 
     bool isArcModeEnabled() const { return arcModeEnabled; }
-    float getTurnRadius() const { return arcTurnRadiusMM; }
     float getArcSpeedMMps() const { return arcSpeedMMps; }
 
     // Compute velocity loop output (target angle offset)
@@ -285,17 +280,6 @@ public:
     // 2. Encoder-based: P on encoder difference (corrects wheel speed mismatch)
     float computeTurnOutput(float dt)
     {
-        // Turn rate control mode: command a constant turn rate
-        if (turnRateControlEnabled)
-        {
-            // Simple P control on turn rate
-            // targetTurnRate is in degrees/second, headingRate is measured rate
-            float rateError = targetTurnRate - headingRate;
-            float turnOutput = TURN_KP * rateError * 0.1f;  // Scale down for rate control
-            return constrain(turnOutput, -MAX_TURN_SPEED, MAX_TURN_SPEED);
-        }
-
-        // Heading control mode: turn to target heading
         if (!headingControlEnabled)
         {
             return 0;
@@ -326,39 +310,12 @@ public:
 
     // === Command Interface ===
 
-    // Set target position (absolute, in encoder counts)
-    void setTargetPosition(int32_t pos)
-    {
-        targetPosition = pos;
-        positionControlEnabled = true;
-    }
-
-    // Move relative to current position (in encoder counts)
-    void moveRelative(int32_t delta)
-    {
-        targetPosition = position + delta;
-        positionControlEnabled = true;
-    }
-
     // Move relative distance in millimeters
     void moveRelativeMM(float distanceMM)
     {
         int32_t counts = (int32_t)(distanceMM * COUNTS_PER_MM);
-        moveRelative(counts);
-    }
-
-    // Set target velocity directly (disables position control)
-    void setTargetVelocity(float vel)
-    {
-        targetVelocity = constrain(vel, -MAX_COMMAND_VELOCITY, MAX_COMMAND_VELOCITY);
-        positionControlEnabled = false;
-        velocityControlEnabled = true;
-    }
-
-    // Set target velocity in mm/s
-    void setTargetVelocityMM(float mmPerSec)
-    {
-        setTargetVelocity(mmPerSec * COUNTS_PER_MM);
+        targetPosition = position + counts;
+        positionControlEnabled = true;
     }
 
     // Stop and hold current position
@@ -366,10 +323,8 @@ public:
     {
         targetPosition = position;
         targetVelocity = 0;
-        targetTurnRate = 0;
         positionControlEnabled = true;
         velocityControlEnabled = true;
-        turnRateControlEnabled = false;
         arcModeEnabled = false;
         arcTargetAngle = 0;
         arcCompletedAngle = 0;
@@ -380,95 +335,13 @@ public:
         headingControlEnabled = true;
     }
 
-    // Turn to absolute heading (degrees)
-    void setTargetHeading(float degrees)
-    {
-        targetHeading = degrees;
-        headingControlEnabled = true;
-    }
-
-    // Turn relative to current heading (degrees)
-    void turnRelative(float degrees)
-    {
-        targetHeading = heading + degrees;
-        headingControlEnabled = true;
-    }
-
-    // Start a coordinated arc motion (move + turn simultaneously)
-    // distanceMM: arc length to travel
-    // angleDeg: total heading change during the arc
-    void startArc(float distanceMM, float angleDeg)
-    {
-        // Set both position and heading targets
-        int32_t counts = (int32_t)(distanceMM * COUNTS_PER_MM);
-        targetPosition = position + counts;
-        targetHeading = heading + angleDeg;
-
-        // Enable both controls
-        positionControlEnabled = true;
-        headingControlEnabled = true;
-    }
-
-    // Disable heading control (for manual turning)
-    void disableHeadingControl()
-    {
-        headingControlEnabled = false;
-    }
-
-    // Set a constant turn rate (degrees per second)
-    // Positive = counterclockwise, negative = clockwise
-    // This disables heading control and directly commands turn output
-    void setTurnRate(float degreesPerSecond)
-    {
-        targetTurnRate = constrain(degreesPerSecond, -MAX_TURN_RATE, MAX_TURN_RATE);
-        turnRateControlEnabled = true;
-        headingControlEnabled = false;
-    }
-
-    // Stop turning (disable turn rate control)
-    void stopTurning()
-    {
-        targetTurnRate = 0;
-        turnRateControlEnabled = false;
-        // Re-enable heading control to hold current heading
-        targetHeading = heading;
-        headingControlEnabled = true;
-        headingPID.reset(heading);  // Reset with current measurement to avoid derivative spike
-    }
-
     // Lock in current heading as target (call at start of move commands)
     void holdCurrentHeading()
     {
         targetHeading = heading;
         headingControlEnabled = true;
-        turnRateControlEnabled = false;
         headingPID.reset(heading);  // Reset with current measurement to avoid derivative spike
         encoderDiffAccum = 0;       // Reset encoder difference tracking
-    }
-
-    // Enter turn-in-place mode (disables position and velocity control)
-    // This allows the heading controller to dominate without outer loops fighting it
-    void enterTurnInPlaceMode()
-    {
-        positionControlEnabled = false;
-        velocityControlEnabled = false;
-        targetVelocity = 0;
-    }
-
-    // Exit turn-in-place mode (re-enables position and velocity control)
-    // Captures current position as new target to accept any drift that occurred
-    void exitTurnInPlaceMode()
-    {
-        // Capture current position as new target (accept drift that occurred)
-        targetPosition = position;
-        targetVelocity = 0;
-        
-        positionControlEnabled = true;
-        velocityControlEnabled = true;
-        
-        // Reset PIDs to avoid integral windup issues
-        velocityPID.reset();
-        positionPID.reset();
     }
 
     // === Getters ===
@@ -476,11 +349,9 @@ public:
     int32_t getPosition() const { return position; }
     float getVelocity() const { return velocity; }
     float getTargetVelocity() const { return targetVelocity; }
-    int32_t getTargetPosition() const { return targetPosition; }
     float getHeading() const { return heading; }
     float getHeadingRate() const { return headingRate; }
     float getTargetHeading() const { return targetHeading; }
-    float getArcTightness() const { return arcTightness; }
     
     // Get normalized heading error (for debugging)
     // Positive = need to turn CCW, Negative = need to turn CW
@@ -491,10 +362,6 @@ public:
         while (error < -180.0f) error += 360.0f;
         return error;
     }
-
-    // Get accumulated encoder difference (for debugging)
-    // Positive = left moved more than right = veered right
-    int32_t getEncoderDiffAccum() const { return encoderDiffAccum; }
 
     // Get position in millimeters
     float getPositionMM() const { return (float)position / COUNTS_PER_MM; }
@@ -519,16 +386,6 @@ public:
         return fabs(error) < toleranceDeg;
     }
 
-    // === Configuration ===
-
-    void enablePositionControl(bool enable) { positionControlEnabled = enable; }
-    void enableVelocityControl(bool enable) { velocityControlEnabled = enable; }
-
-    // Access to PID controllers for tuning
-    PIDController& getVelocityPID() { return velocityPID; }
-    PIDController& getPositionPID() { return positionPID; }
-    PIDController& getHeadingPID() { return headingPID; }
-
 private:
     Zumo32U4Encoders* encoders;
 
@@ -542,7 +399,6 @@ private:
     float targetHeading;      // Target heading (degrees)
     float heading;            // Current heading (degrees)
     float headingRate;        // Current turn rate (degrees/second)
-    float targetTurnRate;     // Target turn rate for timed rotation (degrees/second)
 
     // Arc turn state
     bool arcModeEnabled;
@@ -561,13 +417,11 @@ private:
 
     // Timing
     uint32_t lastVelocityUpdateTime;
-    uint32_t lastPositionUpdateTime;
 
     // Control enable flags
     bool positionControlEnabled;
     bool velocityControlEnabled;
     bool headingControlEnabled;
-    bool turnRateControlEnabled;
 
     // PID controllers
     PIDController velocityPID;

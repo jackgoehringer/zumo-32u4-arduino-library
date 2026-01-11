@@ -185,16 +185,9 @@ public:
 
     bool isIdle() const { return !busy; }
     bool isBusy() const { return busy; }
-    CommandType getCurrentCommandType() const { return currentCommand.type; }
-
-    // Get progress info for display
-    float getCurrentArcTightness() const { return currentCommand.param1; }
-    float getCurrentArcSpeed() const { return currentCommand.param2; }
-    float getCurrentArcAngle() const { return currentCommand.param3; }
 
 private:
     MotionController* motionController;
     Command currentCommand;
     bool busy;
-    bool turningInPlace;  // True during explicit rotate() commands
 };

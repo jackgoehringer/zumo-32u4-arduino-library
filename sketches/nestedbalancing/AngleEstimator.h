@@ -145,18 +145,6 @@ public:
         return angleRate;
     }
 
-    // Get last accelerometer-derived angle (for debugging)
-    float getAccelAngle() const
-    {
-        return accelAngle;
-    }
-
-    // Get current gyro offset (for debugging)
-    float getGyroOffset() const
-    {
-        return gyroOffset;
-    }
-
     // Get Z-axis gyro offset (for heading control)
     float getGyroOffsetZ() const
     {
@@ -177,12 +165,6 @@ public:
                            GYRO_DRIFT_ALPHA * (float)rawGyroZ;
         }
 #endif
-    }
-
-    // Reset angle to a specific value (e.g., after recovery)
-    void setAngle(float newAngle)
-    {
-        angle = newAngle;
     }
 
     // Reset angle estimator state
