@@ -2,19 +2,21 @@
  *
  * This sketch implements a robust balancing algorithm with three control loops:
  *   - Inner Loop (fastest): Angle PID controller
- *   - Middle Loop: Velocity PID controller
+ *   - Middle Loop: Velocity PID controller with feedforward
  *   - Outer Loop (slowest): Position PID controller
  *
  * Features:
  *   - Complementary filter for angle estimation (gyro + accelerometer fusion)
  *   - Encoder-based position and velocity tracking
- *   - Movement command interface (move forward/backward, turn)
+ *   - Trapezoidal motion profiles for smooth move/turn execution
+ *   - Velocity and acceleration feedforward for proactive control
+ *   - Friction feedforward to overcome Coulomb friction of tracks
  *   - Fall detection and recovery
  *
- * Control Hierarchy:
- *   Position Command -> Position Loop -> Velocity Setpoint
- *   Velocity Setpoint -> Velocity Loop -> Angle Offset
+ * Control Hierarchy (with profiles):
+ *   Motion Profile -> Position Tracking + Feedforward -> Velocity Loop -> Angle Offset
  *   (Balance Angle + Angle Offset) -> Angle Loop -> Motor PWM
+ *   Turn Profile -> Heading PID + Rate Feedforward + Friction FF -> Motor Differential
  *
  * Hardware: Zumo 32U4 with LCD or OLED display
  *
@@ -25,6 +27,8 @@
  *   4. Add small Ki to eliminate steady-state error
  *   5. Enable velocity loop, tune Kp to reduce drift
  *   6. Enable position loop, tune Kp for position holding
+ *   7. Tune profile constraints (max velocity, max acceleration)
+ *   8. Tune feedforward gains (KV, KA) to minimize PID effort
  */
 
 #include <Wire.h>
@@ -33,6 +37,7 @@
 #include "Config.h"
 #include "PIDController.h"
 #include "AngleEstimator.h"
+#include "MotionProfile.h"
 #include "MotionController.h"
 #include "CommandHandler.h"
 
@@ -68,12 +73,18 @@ RobotState robotState = RobotState::WAITING;
 uint32_t lastMiddleLoopTime = 0;
 uint32_t lastOuterLoopTime = 0;
 uint32_t lastDisplayTime = 0;
+uint32_t lastSerialDebugTime = 0;
 
 // Current control outputs
 float targetAngle = BALANCE_ANGLE;
-float angleOffset = 0;      // From velocity loop
+float angleOffset = 0;      // From velocity loop (includes feedforward)
 float motorOutput = 0;      // From angle loop
-float turnOutput = 0;       // From heading control
+float turnOutput = 0;       // From heading control (includes friction FF)
+float angleIntegral = 0;    // Inner loop integral term (must persist across runInnerLoop calls)
+
+// Motor speeds (saved for debug output)
+float debugLeftSpeed = 0;
+float debugRightSpeed = 0;
 
 // Demo mode state
 bool demoMode = false;
@@ -91,10 +102,17 @@ void calibrateGyro();
 void startBalancing();
 void stopBalancing();
 void handleFall();
+void serialDebugOutput();
 
 void setup()
 {
     Wire.begin();
+
+#if ENABLE_SERIAL_DEBUG
+    Serial.begin(SERIAL_BAUD_RATE);
+    // Print CSV header
+    Serial.println(F("time_ms,angle,targetAngle,angleRate,motorOut,leftSpd,rightSpd,vel,targetVel,angleOff,heading,targetHead,turnOut,busy"));
+#endif
 
     // Initialize display
     display.clear();
@@ -165,6 +183,15 @@ void loop()
             handleButtons();
         }
 
+#if ENABLE_SERIAL_DEBUG
+        // Serial debug output at configured rate
+        if (now - lastSerialDebugTime >= SERIAL_DEBUG_PERIOD_US)
+        {
+            lastSerialDebugTime = now;
+            serialDebugOutput();
+        }
+#endif
+
         // Run demo sequence if active
         if (demoMode)
         {
@@ -215,13 +242,6 @@ void runInnerLoop()
     float currentAngle = angleEstimator.getAngle();
     float angleRate = angleEstimator.getAngleRate();
 
-    // Track mode transitions to reset integral
-    static float integral = 0;
-    
-    // ARC TURN MODE: Use full cascaded control including velocity loop
-    // The MotionController keeps velocity control enabled during arc turns,
-    // so we must apply angleOffset to maintain the commanded forward speed
-    
     // Compute target angle (balance point + offset from velocity loop)
     targetAngle = BALANCE_ANGLE + angleOffset;
 
@@ -232,32 +252,54 @@ void runInnerLoop()
     float dError = angleRate;  // Derivative of error (same sign as angle rate)
 
     // Manual PID computation for better control
-    integral += error;
-    integral = constrain(integral, ANGLE_INTEGRAL_MIN, ANGLE_INTEGRAL_MAX);
+    // angleIntegral is a global variable so it can be reset in startBalancing()
+    angleIntegral += error;
+    angleIntegral = constrain(angleIntegral, ANGLE_INTEGRAL_MIN, ANGLE_INTEGRAL_MAX);
 
-    motorOutput = ANGLE_KP * error + ANGLE_KI * integral + ANGLE_KD * dError;
+    motorOutput = ANGLE_KP * error + ANGLE_KI * angleIntegral + ANGLE_KD * dError;
     motorOutput = constrain(motorOutput, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
 
-    // Apply minimum motor output during active commands to overcome static friction
-    // This helps ensure the robot has enough power to start moving from rest
-    if (MIN_MOTOR_OUTPUT > 0 && commandHandler.isBusy())
+    // Compute left/right motor speeds
+    float leftSpeed, rightSpeed;
+
+    if (motionController.isArcModeEnabled())
     {
-        // Apply minimum threshold while preserving sign
-        if (motorOutput > 0 && motorOutput < MIN_MOTOR_OUTPUT)
+        // ARC TURN MODE: Combine feedforward arc drive with balance correction
+        float leftBase, rightBase;
+        motionController.getArcBaseWheelSpeeds(leftBase, rightBase);
+
+        // Add balance correction (motorOutput) to both wheels equally
+        leftSpeed = leftBase + motorOutput;
+        rightSpeed = rightBase + motorOutput;
+    }
+    else
+    {
+        // NORMAL MODE: Balance correction + heading differential
+        // turnOutput already includes turn friction feedforward (from MotionController)
+        leftSpeed = motorOutput - turnOutput;
+        rightSpeed = motorOutput + turnOutput;
+
+        // Apply move settling friction feedforward (motor-level)
+        // This small constant effort in the direction of position error helps
+        // overcome track friction during the last few mm of a move command.
+        // It's computed by MotionController based on profile state and position error.
+        float moveFrictionFF = motionController.getMoveFrictionFF();
+        if (moveFrictionFF != 0)
         {
-            motorOutput = MIN_MOTOR_OUTPUT;
-        }
-        else if (motorOutput < 0 && motorOutput > -MIN_MOTOR_OUTPUT)
-        {
-            motorOutput = -MIN_MOTOR_OUTPUT;
+            leftSpeed += moveFrictionFF;
+            rightSpeed += moveFrictionFF;
         }
     }
 
-    // Apply motor output with turn differential
-    int16_t leftSpeed = constrain((int16_t)(motorOutput - turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-    int16_t rightSpeed = constrain((int16_t)(motorOutput + turnOutput), -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+    // Final constraining to hardware limits
+    leftSpeed = constrain(leftSpeed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
+    rightSpeed = constrain(rightSpeed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
 
-    motors.setSpeeds(leftSpeed, rightSpeed);
+    // Save for debug output
+    debugLeftSpeed = leftSpeed;
+    debugRightSpeed = rightSpeed;
+
+    motors.setSpeeds((int16_t)leftSpeed, (int16_t)rightSpeed);
 }
 
 // Middle loop: Velocity control (~50 Hz)
@@ -274,11 +316,13 @@ void runMiddleLoop()
 
     float dt = MIDDLE_LOOP_PERIOD_US / 1000000.0f;
 
-    angleOffset = motionController.computeVelocityLoop(dt);
-
     // Update heading from gyro Z-axis (using calibrated offset)
+    // Do this before computeVelocityLoop/computeTurnOutput so they have fresh data
     imu.readGyro();
     motionController.updateHeading(imu.g.z, angleEstimator.getGyroOffsetZ(), dt);
+
+    // Compute velocity loop output (includes profile update and feedforward)
+    angleOffset = motionController.computeVelocityLoop(dt);
 
     // Update arc progress if active
     if (motionController.isArcModeEnabled())
@@ -295,10 +339,10 @@ void runMiddleLoop()
         motionController.getVelocity()
     );
 
-    // Compute turn output (with dt for proper integral term)
+    // Compute turn output (includes turn profile update, feedforward, friction FF)
     turnOutput = motionController.computeTurnOutput(dt);
 
-    // Update command handler
+    // Update command handler (checks completion)
     commandHandler.update();
 }
 
@@ -306,6 +350,7 @@ void runMiddleLoop()
 void runOuterLoop()
 {
     float dt = OUTER_LOOP_PERIOD_US / 1000000.0f;
+    // Only runs when no move profile is active (for position holding)
     motionController.computePositionLoop(dt);
 }
 
@@ -446,6 +491,13 @@ void startBalancing()
     // Reset angle to 0 since robot is now in balance position
     angleEstimator.reset();
 
+    // Reset all control state variables to prevent accumulation between runs
+    targetAngle = BALANCE_ANGLE;
+    angleOffset = 0;
+    motorOutput = 0;
+    turnOutput = 0;
+    angleIntegral = 0;  // Critical: reset inner loop integral
+
     // Initialize timing
     lastMiddleLoopTime = micros();
     lastOuterLoopTime = micros();
@@ -474,6 +526,12 @@ void stopBalancing()
     robotState = RobotState::STOPPED;
     demoMode = false;
 
+    // Reset control state to prevent accumulation
+    angleIntegral = 0;
+    angleOffset = 0;
+    motorOutput = 0;
+    turnOutput = 0;
+
     display.clear();
     display.print(F("Stopped"));
     display.gotoXY(0, 1);
@@ -490,6 +548,12 @@ void handleFall()
     demoMode = false;
     commandHandler.clear();
 
+    // Reset control state to prevent accumulation
+    angleIntegral = 0;
+    angleOffset = 0;
+    motorOutput = 0;
+    turnOutput = 0;
+
     display.clear();
     display.print(F("Fallen!"));
     display.gotoXY(0, 1);
@@ -499,7 +563,7 @@ void handleFall()
     buzzer.playNote(NOTE_A(3), 300, 15);
 }
 
-// Run demo sequence: Move forward 300mm, rotate for 500ms, repeat
+// Run demo sequence: Simple square pattern using new turn() command
 void runDemoSequence()
 {
     uint32_t elapsed = millis() - demoStartTime;
@@ -521,8 +585,9 @@ void runDemoSequence()
         }
         break;
 
+    // Simple square pattern: move, turn 90, repeat 4 times
     case 1:
-        commandHandler.move(-200);
+        commandHandler.move(-150);
         demoStep++;
         break;
     case 2:
@@ -530,15 +595,16 @@ void runDemoSequence()
         demoStep++;
         break;
     case 3:
-        commandHandler.turnArc(0.2, 75, 90);
+        commandHandler.turn(90);  // Turn 90 degrees CCW
         demoStep++;
         break;
     case 4:
         commandHandler.wait(100);
         demoStep++;
         break;
+
     case 5:
-        commandHandler.move(-200);
+        commandHandler.move(-150);
         demoStep++;
         break;
     case 6:
@@ -546,15 +612,16 @@ void runDemoSequence()
         demoStep++;
         break;
     case 7:
-        commandHandler.turnArc(0.2, 75, 90);
+        commandHandler.turn(90);
         demoStep++;
         break;
     case 8:
         commandHandler.wait(100);
         demoStep++;
         break;
+
     case 9:
-        commandHandler.move(-200);
+        commandHandler.move(-150);
         demoStep++;
         break;
     case 10:
@@ -562,15 +629,16 @@ void runDemoSequence()
         demoStep++;
         break;
     case 11:
-        commandHandler.turnArc(0.2, 75, 90);
+        commandHandler.turn(90);
         demoStep++;
         break;
     case 12:
         commandHandler.wait(100);
         demoStep++;
         break;
+
     case 13:
-        commandHandler.move(-200);
+        commandHandler.move(-150);
         demoStep++;
         break;
     case 14:
@@ -578,11 +646,11 @@ void runDemoSequence()
         demoStep++;
         break;
     case 15:
-        commandHandler.turnArc(0.2, 75, 90);
+        commandHandler.turn(90);
         demoStep++;
         break;
     case 16:
-        commandHandler.wait(100);
+        commandHandler.wait(200);  // Longer pause before repeating
         demoStep++;
         break;
 
@@ -592,3 +660,41 @@ void runDemoSequence()
         break;
     }
 }
+
+#if ENABLE_SERIAL_DEBUG
+// Serial debug output - CSV format for easy plotting
+// Outputs key control values at SERIAL_DEBUG_PERIOD_US rate
+void serialDebugOutput()
+{
+    // Format: time_ms,angle,targetAngle,angleRate,motorOut,leftSpd,rightSpd,
+    //         vel,targetVel,angleOff,heading,targetHead,turnOut,busy
+
+    Serial.print(millis());
+    Serial.print(',');
+    Serial.print(angleEstimator.getAngle(), 2);
+    Serial.print(',');
+    Serial.print(targetAngle, 2);
+    Serial.print(',');
+    Serial.print(angleEstimator.getAngleRate(), 2);
+    Serial.print(',');
+    Serial.print(motorOutput, 1);
+    Serial.print(',');
+    Serial.print(debugLeftSpeed, 1);
+    Serial.print(',');
+    Serial.print(debugRightSpeed, 1);
+    Serial.print(',');
+    Serial.print(motionController.getVelocity(), 1);
+    Serial.print(',');
+    Serial.print(motionController.getTargetVelocity(), 1);
+    Serial.print(',');
+    Serial.print(angleOffset, 2);
+    Serial.print(',');
+    Serial.print(motionController.getHeading(), 1);
+    Serial.print(',');
+    Serial.print(motionController.getTargetHeading(), 1);
+    Serial.print(',');
+    Serial.print(turnOutput, 1);
+    Serial.print(',');
+    Serial.println(commandHandler.isBusy() ? 1 : 0);
+}
+#endif

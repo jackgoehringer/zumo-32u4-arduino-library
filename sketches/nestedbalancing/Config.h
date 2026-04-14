@@ -45,7 +45,7 @@
 // Set this to the angle shown when robot is balanced.
 // OLED version is heavier on top, needs more forward lean
 
-#define BALANCE_ANGLE -1.4f      // STEP 1: Find this value first!
+#define BALANCE_ANGLE 1.4f      // STEP 1: Find this value first!
 
 // Complementary filter accelerometer weight
 // Higher = trusts accelerometer more (reduces gyro drift)
@@ -127,8 +127,95 @@
 
 // Maximum velocity from position controller (counts per second)
 // ~500 counts/s = ~55 mm/s
-#define POSITION_OUTPUT_MIN -1000.0f
-#define POSITION_OUTPUT_MAX 1000.0f
+#define POSITION_OUTPUT_MIN -2000.0f
+#define POSITION_OUTPUT_MAX 2000.0f
+
+// =============================================================================
+// MOTION PROFILES (Trapezoidal Velocity Profiles)
+// =============================================================================
+// Instead of step-changing the setpoint and relying on PID to chase it,
+// motion profiles plan smooth acceleration -> cruise -> deceleration
+// trajectories. This ensures the controller always has enough authority
+// to execute the motion, and prevents the "last mile" stall problem.
+
+// Move profile constraints (in encoder counts)
+// Max velocity: ~157 mm/s at 1500 counts/s
+// Max accel: moderate ramp, reaches max velocity in 0.5s
+#define MOVE_PROFILE_MAX_VELOCITY    1500.0f   // counts/s
+#define MOVE_PROFILE_MAX_ACCEL       3000.0f   // counts/s^2
+
+// Turn profile constraints (in degrees)
+// Max turn rate: 120 deg/s (a 90-degree turn takes ~1s)
+// Max turn accel: reaches max rate in 0.4s
+#define TURN_PROFILE_MAX_VELOCITY    120.0f    // deg/s
+#define TURN_PROFILE_MAX_ACCEL       300.0f    // deg/s^2
+
+// =============================================================================
+// FEEDFORWARD GAINS
+// =============================================================================
+// Feedforward terms provide proactive control effort based on the planned
+// motion, rather than waiting for error to accumulate. This dramatically
+// reduces the burden on the PID feedback controllers.
+
+// Velocity feedforward: angle offset per unit desired velocity
+// Represents how much lean is needed to sustain a given forward speed
+// (compensates for rolling friction of tracks)
+#define VELOCITY_FF_KV 0.003f     // degrees per (counts/s)
+
+// Acceleration feedforward: angle offset per unit desired acceleration
+// Represents how much extra lean is needed to change speed
+#define VELOCITY_FF_KA 0.0003f    // degrees per (counts/s^2)
+
+// Turn rate feedforward: turn output per unit desired heading rate
+// Provides the differential motor speed needed to rotate at a given rate
+#define TURN_FF_KV 0.5f           // motor units per (deg/s)
+
+// Maximum total angle offset (feedforward + PID combined)
+// Wider than the PID-only limit to allow feedforward headroom
+#define ANGLE_OFFSET_MAX 20.0f    // degrees
+
+// =============================================================================
+// FRICTION FEEDFORWARD
+// =============================================================================
+// Constant motor effort applied in the direction of intended motion to
+// overcome Coulomb (static) friction of the Zumo's tracks. Applied at
+// the motor level, not through the angle cascade.
+
+// Turn friction FF: differential motor units during active turn profile
+// Ensures the wheels have enough differential to overcome track friction
+#define FRICTION_FF_TURN 40.0f
+
+// Turn settling friction FF: smaller differential during post-profile settling
+// Applied when heading error exceeds deadband after profile completes
+#define FRICTION_FF_TURN_SETTLE 35.0f
+
+// Move settling friction FF: motor output during post-profile position settling
+// Applied to both motors in the direction of position error
+// Keep small to avoid destabilizing the balance controller (~30 PWM = ~0.7 deg equivalent)
+#define FRICTION_FF_MOVE_SETTLE 30.0f
+
+// =============================================================================
+// COMMAND SETTLING AND COMPLETION
+// =============================================================================
+// After a motion profile finishes, the robot enters a settling phase where
+// the PID controllers correct any residual error. The command is complete
+// when the error is within tolerance for several consecutive cycles.
+
+// Move settling
+#define MOVE_SETTLE_TOLERANCE      50        // encoder counts (~5.2mm)
+#define MOVE_SETTLE_VELOCITY       30.0f     // counts/s max velocity for "settled"
+#define MOVE_SETTLE_COUNT          3         // consecutive 50Hz cycles
+
+// Turn settling deadband: below this heading error, friction FF is removed
+#define TURN_SETTLE_DEADBAND_DEG   2.0f
+
+// Higher position gain during settling (overcomes cascaded gain attenuation)
+// Used after move profile completes to drive the last few mm more aggressively
+#define POSITION_KP_SETTLE 4.0f
+
+// Safety timeout for any command (milliseconds)
+// If a command doesn't complete within this time, force-complete it
+#define COMMAND_TIMEOUT_MS 10000
 
 // =============================================================================
 // TURN CONTROLLER (Heading/Yaw)
@@ -139,31 +226,68 @@
 
 // Tuning guide:
 // - KP: Controls how aggressively robot turns toward target. Too high = overshoot.
-//       With max output 100 and typical error up to 180 deg, KP ~0.5 gives output ~90 at 180 deg error.
 // - KD: Critical for damping! Opposes rotational velocity to prevent overshoot.
-//       Should be high enough to stop rotation before reaching target.
+//       With profiles providing the reference trajectory, KD damps deviations.
 // - KI: Only needed if there's steady-state error. Start at 0, add if needed.
-#define TURN_KP 1.0f         // Proportional gain for heading error (degrees)
+#define TURN_KP 1.5f         // Proportional gain for heading error (degrees)
 #define TURN_KI 0.0f         // Integral gain for steady-state correction (start at 0)
-#define TURN_KD 0.8f         // Derivative gain (damping from gyro rate) - CRITICAL
+#define TURN_KD 0.08f        // Derivative gain (damping from heading rate change)
 
 // Integral windup limits for heading controller (degrees * seconds)
 #define TURN_INTEGRAL_MIN -50.0f
 #define TURN_INTEGRAL_MAX 50.0f
 
 // Output limits (differential motor speed)
-#define TURN_OUTPUT_MIN -200.0f
-#define TURN_OUTPUT_MAX 200.0f
+// Must be symmetric to allow both CCW (positive) and CW (negative) turns
+#define TURN_OUTPUT_MIN -400.0f
+#define TURN_OUTPUT_MAX 400.0f
 
 // Maximum differential motor speed for turning
-#define MAX_TURN_SPEED 100.0f
+#define MAX_TURN_SPEED 400.0f
 
 // Wheel track width (center-to-center distance between wheels, in mm)
 #define WHEEL_TRACK_MM 85.0f
 #define HALF_TRACK_MM (WHEEL_TRACK_MM / 2.0f)
 
-// Acceptable heading error (degrees) - used for atTargetHeading() tolerance
+// Acceptable heading error (degrees) - used for turn completion tolerance
 #define HEADING_TOLERANCE_DEG 5.0f
+
+// Turn completion requires low heading error AND low turn rate for several cycles
+// This prevents early completion while still rotating
+#define HEADING_RATE_TOLERANCE_DPS 9.0f
+#define HEADING_SETTLE_COUNT 5
+
+// Slew-rate limit for turn output (motor units per second)
+// Reduces sudden yaw acceleration for smoother, more accurate turns
+#define TURN_OUTPUT_SLEW_RATE 1200.0f
+
+// Reduce position-hold influence during turns (counts per second)
+// Small velocities inside this band are ignored during turn commands
+#define TURN_POSITION_VELOCITY_DEADBAND 180.0f
+
+// =============================================================================
+// DEPRECATED - Turn output shaping (replaced by motion profiles)
+// =============================================================================
+// These constants are no longer used. The trapezoidal turn profile and
+// friction feedforward replace all of this ad-hoc logic.
+//
+// #define TURN_SLOWDOWN_ANGLE_DEG 45.0f
+// #define TURN_MIN_OUTPUT 80.0f
+// #define TURN_MIN_OUTPUT_ANGLE_DEG 18.0f
+// #define TURN_WHEEL_MIN_OUTPUT 60.0f
+// #define TURN_STALL_DELTA_COUNTS 6
+// #define TURN_STALL_SPEED_THRESHOLD 130.0f
+// #define TURN_STALL_BOOST 35.0f
+
+// =============================================================================
+// DEPRECATED - Per-motor minimum output (replaced by friction feedforward)
+// =============================================================================
+// The old MIN_MOTOR_OUTPUT approach keyed off the sign of motorOutput,
+// which oscillates during balance, making the enforcement unreliable.
+// Friction feedforward replaces this with direction based on the planned
+// motion trajectory.
+//
+// #define MIN_MOTOR_OUTPUT 70
 
 // =============================================================================
 // ENCODER-BASED HEADING CORRECTION
@@ -171,12 +295,12 @@
 
 // Hybrid heading control uses both gyro and encoder difference to maintain heading
 // Encoder difference detects wheel speed mismatch (friction, motor differences)
-// This correction is always active when heading control is enabled
+// This correction is always active when heading control is enabled (non-turn mode)
 
 // Proportional gain for encoder difference correction
 // Units: motor speed per encoder count difference
 // Higher = more aggressive correction for wheel speed mismatch
-#define ENCODER_HEADING_KP 0.8f
+#define ENCODER_HEADING_KP 1.0f
 
 // Maximum correction from encoder difference (prevents overcorrection)
 #define ENCODER_HEADING_MAX 50.0f
@@ -186,8 +310,17 @@
 // =============================================================================
 
 // Arc completion tolerances
-#define ARC_ANGLE_TOLERANCE_DEG 2.0f      // heading tolerance for arc completion
-#define ARC_LENGTH_TOLERANCE_MM 2.0f      // arc length tolerance in mm
+#define ARC_ANGLE_TOLERANCE_DEG 3.0f      // heading tolerance for arc completion
+#define ARC_LENGTH_TOLERANCE_MM 3.0f      // arc length tolerance in mm
+
+// Arc feedforward base motor effort
+// This provides forward drive during arc turns, independent of balance correction.
+// Without this, when the robot is balanced (motorOutput near zero), the arc stops.
+// Higher values = stronger forward drive during arcs (may affect balance stability)
+// Lower values = weaker drive, may stall on friction
+// The actual motor speed is: (targetVelocity / MAX_COMMAND_VELOCITY) * ARC_BASE_EFFORT
+// At 75 mm/s with default MAX_COMMAND_VELOCITY of 1000, this gives ~150 * 0.716 = ~107
+#define ARC_BASE_EFFORT 180.0f
 
 // =============================================================================
 // SAFETY LIMITS
@@ -201,11 +334,6 @@
 
 // Maximum motor speed (hardware limit is 400)
 #define MAX_MOTOR_SPEED 400
-
-// Minimum motor output during active commands (helps overcome static friction)
-// This ensures enough baseline power to move when turning or accelerating from rest
-// Set to 0 to disable, typical range: 30-80
-#define MIN_MOTOR_OUTPUT 70
 
 // =============================================================================
 // MOTION COMMAND LIMITS
@@ -238,3 +366,21 @@
 
 #define ENABLE_GYRO_Z_DRIFT_COMPENSATION true
 #define GYRO_Z_DRIFT_RATE_THRESHOLD 2.0f      // degrees per second
+
+// =============================================================================
+// SERIAL DEBUG OUTPUT
+// =============================================================================
+
+// Enable serial debug output (set to false for production, saves memory)
+#define ENABLE_SERIAL_DEBUG true
+
+// Serial baud rate
+#define SERIAL_BAUD_RATE 115200
+
+// Debug output rate (how often to print, in microseconds)
+// 50000 = 20 Hz, good balance between detail and readability
+#define SERIAL_DEBUG_PERIOD_US 50000
+
+// Output format: CSV for easy plotting/analysis
+// Columns: time,angle,targetAngle,angleRate,motorOut,leftSpd,rightSpd,
+//          velocity,targetVelocity,angleOff,heading,targetHead,turnOut,cmdBusy

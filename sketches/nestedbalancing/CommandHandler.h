@@ -17,6 +17,10 @@
  *
  * Single-command execution model: one command at a time, check isIdle()
  * before issuing new commands.
+ *
+ * Commands now use trapezoidal motion profiles for smooth execution.
+ * Completion is determined by profile completion + settling, with a
+ * safety timeout as a fallback.
  */
 
 // Command types
@@ -24,7 +28,8 @@ enum class CommandType : uint8_t
 {
     NONE,       // No command / idle
     MOVE,       // Straight line movement (forward/backward)
-    ARC,        // Arc turn with tightness/speed/angle
+    TURN,       // Simple turn by changing target heading
+    ARC,        // Arc turn with tightness/speed/angle (legacy)
     WAIT        // Timed pause
 };
 
@@ -92,10 +97,38 @@ public:
         return true;
     }
 
+    // Simple turn by angle (degrees, positive=CCW, negative=CW)
+    // This starts a trapezoidal heading profile and lets the heading
+    // controller track it. The robot will turn in place while maintaining balance.
+    bool turn(float angleDeg)
+    {
+        if (busy || !motionController)
+        {
+            return false;
+        }
+
+        if (angleDeg == 0.0f)
+        {
+            return false;
+        }
+
+        currentCommand.type = CommandType::TURN;
+        currentCommand.param1 = angleDeg;
+        currentCommand.param2 = 0;
+        currentCommand.param3 = 0;
+        currentCommand.startTime = millis();
+        currentCommand.duration = 0;
+
+        motionController->turnRelative(angleDeg);
+        busy = true;
+        return true;
+    }
+
     // Turn along an arc (tightness 0-1, speed mm/s, angle degrees)
     // tightness: 0 = straight, 1 = minimum radius (inner wheel stopped)
     // speedMMperSec: forward speed during turn (positive=forward)
     // angleDeg: heading change (positive=CCW, negative=CW)
+    // NOTE: Consider using turn() instead - it's simpler and uses motion profiles
     bool turnArc(float tightness, float speedMMperSec, float angleDeg)
     {
         if (busy || !motionController)
@@ -152,19 +185,31 @@ public:
         }
 
         bool complete = false;
+        uint32_t elapsed = millis() - currentCommand.startTime;
 
         switch (currentCommand.type)
         {
         case CommandType::MOVE:
-            complete = motionController->atTargetPosition();
+            // Profile-based completion: profile finished + position/velocity settled
+            complete = motionController->isMoveComplete();
+            // Safety timeout
+            if (elapsed > COMMAND_TIMEOUT_MS) { complete = true; }
+            break;
+
+        case CommandType::TURN:
+            // Profile-based completion: profile finished + heading/rate settled
+            complete = motionController->isTurnComplete();
+            // Safety timeout
+            if (elapsed > COMMAND_TIMEOUT_MS) { complete = true; }
             break;
 
         case CommandType::ARC:
             complete = motionController->isArcComplete();
+            if (elapsed > COMMAND_TIMEOUT_MS) { complete = true; }
             break;
 
         case CommandType::WAIT:
-            complete = (millis() - currentCommand.startTime) >= currentCommand.duration;
+            complete = elapsed >= currentCommand.duration;
             break;
 
         case CommandType::NONE:
